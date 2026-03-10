@@ -1,0 +1,44 @@
+# Agent
+agent_command: "claude"           # "claude", "codex", "kiro-cli chat", or custom
+agent_timeout_seconds: 300        # Max time per agent invocation
+
+# Budgets
+time_budget_minutes: 120          # Total wall-clock time for the run
+# cost_budget_usd: null           # Optional: stop if estimated cost exceeds this
+# max_iterations: null             # Optional: hard cap on iteration count
+
+# Stop conditions
+max_consecutive_rejections: 5     # Stop after N rejections in a row
+max_file_churn: 3                 # Stop if same file modified N times with no net gain
+min_confidence_threshold: 0.3     # Stop if avg confidence drops below this
+
+# Evaluation
+eval_refinement_interval: 5       # Iterations between criteria review proposals
+llm_judge_model: "claude-sonnet"  # Model used for LLM-as-judge evaluation
+llm_judge_runs: 3                 # Repeated judging runs for low-confidence artifacts
+grounding_mode: interactive       # interactive = human approves criteria; auto = use defaults
+
+# Targets — directories or files the agent may improve
+target_paths:
+  - src/
+
+# Excluded from evaluation and modification
+exclude_paths:
+  - tests/
+  - node_modules/
+  - .autoimprove/
+
+# Policy / guardrails
+protected_paths:                  # Glob patterns the agent must never modify
+  - "*.lock"
+  - "migrations/"
+max_diff_lines: 500               # Max lines changed per iteration
+allow_dependency_changes: false   # Reject changes to package.json, requirements.txt, etc.
+secret_patterns:                  # Regex patterns to detect leaked secrets in diffs
+  - "AKIA[0-9A-Z]{16}"
+
+# Confidence thresholds per artifact type (higher = stricter)
+confidence_thresholds:
+  code: 0.6
+  workflow: 0.4
+  document: 0.3
