@@ -14,7 +14,7 @@ min_confidence_threshold: 0.3     # Stop if avg confidence drops below this
 
 # Evaluation
 eval_refinement_interval: 5       # Iterations between criteria review proposals
-llm_judge_model: "claude-sonnet"  # Model used for LLM-as-judge evaluation
+llm_judge_model: "claude-opus-4-6"  # Model used for LLM-as-judge evaluation
 llm_judge_runs: 3                 # Repeated judging runs for low-confidence artifacts
 grounding_mode: interactive       # interactive = human approves criteria; auto = use defaults
 
