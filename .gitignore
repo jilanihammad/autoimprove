@@ -1,4 +1,7 @@
-
-# Dolt database files (added by bd init)
-.dolt/
-*.db
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.autoimprove/
