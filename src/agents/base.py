@@ -57,21 +57,38 @@ class BaseAgent:
         return AgentResult(True, result.stdout, duration_seconds=duration)
 
     def parse_json(self, output: str) -> dict | list | None:
-        """Extract JSON from agent output (handles markdown fences)."""
-        # Try markdown fenced JSON
-        m = re.search(r"```(?:json)?\s*(\[.*?\]|\{.*?\})\s*```", output, re.DOTALL)
+        """Extract JSON from agent output. Tries multiple strategies."""
+        # Strategy 1: markdown fenced JSON block
+        m = re.search(r"```(?:json)?\s*\n?([\s\S]*?)\n?\s*```", output)
         if m:
             try:
                 return json.loads(m.group(1))
             except json.JSONDecodeError:
                 pass
-        # Try raw JSON
-        m = re.search(r"(\[.*\]|\{.*\})", output, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(1))
-            except json.JSONDecodeError:
-                pass
+
+        # Strategy 2: find the outermost balanced { } or [ ]
+        for opener, closer in [("{", "}"), ("[", "]")]:
+            start = output.find(opener)
+            if start == -1:
+                continue
+            depth = 0
+            for i in range(start, len(output)):
+                if output[i] == opener:
+                    depth += 1
+                elif output[i] == closer:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(output[start : i + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        # Strategy 3: try the entire output as JSON
+        try:
+            return json.loads(output.strip())
+        except json.JSONDecodeError:
+            pass
+
         return None
 
     def _build_command(self, prompt_file: str, working_dir: str) -> tuple:

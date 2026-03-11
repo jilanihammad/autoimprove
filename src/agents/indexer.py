@@ -45,12 +45,31 @@ class IndexerAgent(BaseAgent):
             prompt = self._build_prompt(file_contents)
             result = self.invoke(prompt, working_dir)
 
-            if result.success:
-                parsed = self._parse_summaries(result.output)
+            if not result.success:
+                click.echo(f" failed ({result.error or 'unknown'})")
+                continue
+
+            parsed = self._parse_summaries(result.output)
+            if parsed:
                 summaries.update(parsed)
                 click.echo(f" {len(parsed)} summaries ({result.duration_seconds:.0f}s)")
-            else:
-                click.echo(f" failed ({result.error or 'unknown'})")
+                continue
+
+            # Retry once with stricter prompt
+            click.echo(" parse failed, retrying...", nl=False)
+            retry_prompt = prompt + "\n\nCRITICAL: Respond with ONLY valid JSON. No explanation, no markdown fences, just the raw JSON object."
+            result = self.invoke(retry_prompt, working_dir)
+            if result.success:
+                parsed = self._parse_summaries(result.output)
+                if parsed:
+                    summaries.update(parsed)
+                    click.echo(f" {len(parsed)} summaries ({result.duration_seconds:.0f}s)")
+                    continue
+
+            # Fallback: extract whatever we can as plain text per file
+            fallback = self._fallback_parse(result.output if result.success else "", list(file_contents.keys()))
+            summaries.update(fallback)
+            click.echo(f" {len(fallback)} (fallback)")
 
         return summaries
 
@@ -114,6 +133,31 @@ Respond ONLY with JSON (no markdown fences):
         if isinstance(parsed, dict):
             return parsed.get("summaries", parsed)
         return {}
+
+    def _fallback_parse(self, output: str, file_paths: list[str]) -> dict[str, str]:
+        """Extract per-file summaries from unstructured text output."""
+        summaries: dict[str, str] = {}
+        for fp in file_paths:
+            fname = Path(fp).name
+            # Look for the filename in the output and grab the next few lines
+            idx = output.find(fname)
+            if idx == -1:
+                continue
+            # Grab up to 500 chars after the filename
+            chunk = output[idx : idx + 500]
+            # Take lines until we hit another filename or end
+            lines = []
+            for line in chunk.splitlines()[1:]:
+                if any(Path(other).name in line for other in file_paths if other != fp):
+                    break
+                stripped = line.strip()
+                if stripped:
+                    lines.append(stripped)
+                if len(lines) >= 4:
+                    break
+            if lines:
+                summaries[fp] = " ".join(lines)
+        return summaries
 
     def _count_lines(self, path: Path) -> int:
         try:
