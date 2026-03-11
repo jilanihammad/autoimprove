@@ -173,6 +173,8 @@ class IndexerAgent(BaseAgent):
             parsed = self._parse_summaries(result.output)
             if parsed:
                 return parsed
+        else:
+            status[batch_num] = ("🔄", f"failed: {(result.error or '')[:50]}, retrying...")
 
         # Retry
         status[batch_num] = ("🔄", "retrying...")
@@ -182,6 +184,12 @@ class IndexerAgent(BaseAgent):
             parsed = self._parse_summaries(result.output)
             if parsed:
                 return parsed
+
+        # Last resort: use raw output as summary for single-file batches
+        if len(batch) == 1 and result.success and result.output.strip():
+            # Strip any JSON attempts, just use the text
+            text = result.output.strip()[:500]
+            return {batch[0]: text}
 
         return self._fallback_parse(
             result.output if result.success else "", list(file_contents.keys())
