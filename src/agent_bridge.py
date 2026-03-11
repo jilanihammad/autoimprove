@@ -105,8 +105,10 @@ class AgentBridge:
         iteration: int,
         criteria_summary: str,
         previous_outcomes: list[str],
+        project_memory: str = "",
     ) -> str:
         outcomes_text = "\n".join(previous_outcomes[-5:]) if previous_outcomes else "None yet."
+        memory_section = f"\n## Project Memory (from previous runs)\n{project_memory}\n" if project_memory else ""
         return f"""# AutoImprove — Iteration {iteration}
 
 ## Your Instructions
@@ -115,8 +117,8 @@ class AgentBridge:
 ## Evaluation Criteria
 Your changes will be evaluated against these criteria:
 {criteria_summary}
-
-## Previous Attempts (search memory)
+{memory_section}
+## Previous Attempts (this run)
 {search_memory_summary}
 
 ## Recent Outcomes
@@ -133,6 +135,7 @@ Your changes will be evaluated against these criteria:
 - Make focused, bounded changes (not sweeping rewrites)
 - Do not modify files outside the target paths
 - Do not add new dependencies unless absolutely necessary
+- Do not retry improvements that were already rejected (see previous attempts and project memory)
 - Your changes will be automatically evaluated — focus on quality over quantity
 """
 
@@ -224,7 +227,15 @@ Respond in JSON:
         if agent_type == "codex":
             return ["codex", "-q", "--prompt-file", prompt_file]
         if agent_type == "kiro":
-            return ["kiro-cli", "chat", "--message-file", prompt_file]
+            # kiro-cli takes prompt as positional arg; read file content
+            with open(prompt_file) as f:
+                prompt_text = f.read()
+            return [
+                "kiro-cli", "chat",
+                "--no-interactive", "--trust-all-tools",
+                "--wrap", "never",
+                prompt_text,
+            ]
         # Generic: read prompt from file
         return [self.agent_command, prompt_file]
 

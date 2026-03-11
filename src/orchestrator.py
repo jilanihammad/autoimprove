@@ -25,6 +25,7 @@ from src.eval.search_memory import SearchMemory
 from src.plugins.base import EvaluatorPlugin
 from src.plugins.registry import PluginRegistry
 from src.preflight import run_preflight
+from src.project_memory import ProjectMemory, build_run_summary
 from src.run_context import RunContext
 from src.types import Decision, RunStatus
 
@@ -91,6 +92,12 @@ def run_autoimprove(config: Config) -> None:
     engine = AcceptanceEngine(config, plugin, llm_judge)
     criteria_mgr = CriteriaManager(run_ctx.criteria_dir)
     search_mem = SearchMemory(run_ctx.search_memory_path)
+    project_mem = ProjectMemory(repo_path)
+
+    if project_mem.runs:
+        click.echo(f"Project memory: {len(project_mem.runs)} previous run(s) loaded")
+    else:
+        click.echo("Project memory: first run")
 
     try:
         # 5. Grounding phase
@@ -98,7 +105,7 @@ def run_autoimprove(config: Config) -> None:
 
         # 6. Autonomous loop
         signal.signal(signal.SIGINT, _signal_handler)
-        run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets)
+        run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem)
 
     except KeyboardInterrupt:
         run_ctx.stop_reason = "User interrupt"
@@ -111,6 +118,20 @@ def run_autoimprove(config: Config) -> None:
 
     # 7. Finalize
     run_ctx.finalize(run_ctx.stop_reason or "completed")
+
+    # 8. Save to project memory
+    try:
+        baseline_path = run_ctx.baseline_path
+        baseline_metrics = {}
+        if baseline_path.exists():
+            with open(baseline_path) as f:
+                baseline_metrics = json.load(f).get("metrics", {})
+        summary = build_run_summary(run_ctx, search_mem, plugin.name, baseline_metrics)
+        project_mem.record_run(summary)
+        click.echo(f"Project memory updated ({len(project_mem.runs)} total runs)")
+    except Exception:
+        pass  # Memory save is best-effort
+
     click.echo()
     click.echo("═" * 50)
     click.echo(f"AUTOIMPROVE STOPPED: {run_ctx.stop_reason or 'completed'}")
@@ -270,10 +291,12 @@ def run_autonomous_loop(
     search_mem: SearchMemory,
     config: Config,
     targets: list[str],
+    project_mem: ProjectMemory,
 ) -> None:
     """The heart of AutoImprove: iterate until a stop condition is met."""
     program_path = Path(run_ctx.repo_path) / "program.md"
     program_md = program_path.read_text() if program_path.exists() else ""
+    project_memory_context = project_mem.get_prompt_context()
 
     while True:
         # Check stop conditions
@@ -291,6 +314,7 @@ def run_autonomous_loop(
             iteration=iteration,
             criteria_summary=criteria_mgr.get_current().to_summary_string(),
             previous_outcomes=_recent_outcomes(search_mem),
+            project_memory=project_memory_context,
         )
 
         # 2. Invoke agent
@@ -313,6 +337,19 @@ def run_autonomous_loop(
             )
             run_ctx.record_reject()
             _print_iteration(iteration, "REJECTED:agent", "Agent failed", run_ctx)
+
+            # Check for repeated identical failures — ask user for help
+            if config.grounding_mode != "auto" and _should_ask_user(search_mem, "rejected_agent_error"):
+                action = _ask_user_for_help(
+                    "Agent keeps failing with the same error",
+                    response.error or "Unknown error",
+                )
+                if action == "stop":
+                    run_ctx.stop_reason = "User stopped after repeated agent errors"
+                    break
+                elif action == "skip":
+                    continue
+                # "retry" falls through to next iteration
             continue
 
         # 3. Capture diff
@@ -378,6 +415,20 @@ def run_autonomous_loop(
             and iteration % config.eval_refinement_interval == 0
         ):
             _do_criteria_review(agent, criteria_mgr, search_mem, config, run_ctx, iteration)
+
+        # 8b. Check for repeated rejections — ask user for guidance
+        if (
+            config.grounding_mode != "auto"
+            and decision.decision == Decision.REJECT
+            and _should_ask_user(search_mem, decision.reason)
+        ):
+            action = _ask_user_for_help(
+                f"Last 3 attempts rejected for the same reason: {decision.reason}",
+                json.dumps(decision.detail, indent=2)[:500],
+            )
+            if action == "stop":
+                run_ctx.stop_reason = "User stopped after repeated rejections"
+                break
 
         # 9. Print progress
         score_str = f"{decision.composite_score:.2f}" if decision.composite_score else "-"
@@ -463,6 +514,33 @@ def _extract_hypothesis(output: str) -> str:
         if stripped and len(stripped) > 10:
             return stripped[:200]
     return "Unknown hypothesis"
+
+
+def _should_ask_user(search_mem: SearchMemory, current_reason: str, threshold: int = 3) -> bool:
+    """Return True if the last N attempts all failed with the same reason."""
+    recent = search_mem.hypotheses[-threshold:]
+    if len(recent) < threshold:
+        return False
+    return all(h.outcome == current_reason for h in recent)
+
+
+def _ask_user_for_help(problem: str, detail: str) -> str:
+    """Pause and ask the user what to do. Returns 'retry', 'skip', or 'stop'."""
+    click.echo()
+    click.echo("═" * 50)
+    click.echo(f"⚠  NEEDS YOUR INPUT: {problem}")
+    click.echo(f"   Detail: {detail[:300]}")
+    click.echo("═" * 50)
+    choice = click.prompt(
+        "What should I do? [r]etry / [s]kip & continue / [q]uit",
+        default="r",
+    )
+    choice = choice.strip().lower()
+    if choice in ("q", "quit", "stop"):
+        return "stop"
+    if choice in ("s", "skip"):
+        return "skip"
+    return "retry"
 
 
 def _recent_outcomes(search_mem: SearchMemory, n: int = 5) -> list[str]:

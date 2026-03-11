@@ -81,7 +81,8 @@ class CodePlugin(EvaluatorPlugin):
                 if not fp.is_file() or fp.suffix not in _CODE_EXTENSIONS:
                     continue
                 rel = str(fp)
-                if any(fnmatch(rel, ex) or fnmatch(fp.name, ex) for ex in exclude):
+                parts = fp.parts
+                if any(fnmatch(rel, ex) or fnmatch(fp.name, ex) or any(fnmatch(part, ex.strip("*/")) for part in parts) for ex in exclude):
                     continue
                 targets.append(str(fp))
         return targets
@@ -109,11 +110,17 @@ class CodePlugin(EvaluatorPlugin):
             if "pytest" not in available and not shutil.which("python"):
                 errors.append("No test runner found (pytest or python required)")
         elif project_type == "node":
-            for tool in ("npm", "npx"):
+            for tool in ("npx", "npm"):
                 if shutil.which(tool):
                     available.append(tool)
             if not available:
                 errors.append("npm/npx not found for Node.js project")
+            # Check for jest, eslint, tsc via npx (installed as devDeps)
+            for tool, label in (("jest", "jest"), ("eslint", "eslint"), ("tsc", "typescript")):
+                if shutil.which(tool) or shutil.which("npx"):
+                    available.append(label)
+                else:
+                    missing.append(label)
         else:
             warnings.append(f"Project type '{project_type}' — limited tool support")
 
@@ -352,28 +359,111 @@ class CodePlugin(EvaluatorPlugin):
         )
 
     def _run_npm_test(self, working_dir: str) -> TestResult:
+        # Try Jest first (parses structured output), fall back to npm test
+        jest_result = self._run_jest(working_dir)
+        if jest_result is not None:
+            return jest_result
+        return self._run_npm_test_fallback(working_dir)
+
+    def _run_jest(self, working_dir: str) -> TestResult | None:
+        if not shutil.which("npx"):
+            return None
+        try:
+            result = subprocess.run(
+                ["npx", "jest", "--passWithNoTests", "--forceExit", "--no-coverage"],
+                cwd=working_dir, capture_output=True, text=True, timeout=180,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+
+        output = result.stdout + result.stderr
+        # If jest isn't installed, npx will error — fall back
+        if "Could not locate module" in output or "Cannot find module" in output:
+            return None
+
+        passed = failed = skipped = 0
+        m = re.search(r"Tests:\s+(?:(\d+) failed,?\s*)?(?:(\d+) skipped,?\s*)?(?:(\d+) passed)?", output)
+        if m:
+            failed = int(m.group(1) or 0)
+            skipped = int(m.group(2) or 0)
+            passed = int(m.group(3) or 0)
+
+        total = passed + failed
+        pass_rate = passed / total if total > 0 else (1.0 if result.returncode == 0 else 0.0)
+
+        return TestResult(
+            passed=passed, failed=failed, skipped=skipped,
+            pass_rate=pass_rate, output=output[:2000],
+        )
+
+    def _run_npm_test_fallback(self, working_dir: str) -> TestResult:
         if not shutil.which("npm"):
             return TestResult()
         try:
             result = subprocess.run(
-                ["npm", "test", "--", "--passWithNoTests"],
-                cwd=working_dir, capture_output=True, text=True, timeout=120,
+                ["npm", "test"],
+                cwd=working_dir, capture_output=True, text=True, timeout=180,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return TestResult(output="npm test timed out or not found")
 
-        ok = result.returncode == 0
+        output = result.stdout + result.stderr
+        # Try parsing Jest-style output from npm test
+        passed = failed = skipped = 0
+        m = re.search(r"Tests:\s+(?:(\d+) failed,?\s*)?(?:(\d+) skipped,?\s*)?(?:(\d+) passed)?", output)
+        if m:
+            failed = int(m.group(1) or 0)
+            skipped = int(m.group(2) or 0)
+            passed = int(m.group(3) or 0)
+            total = passed + failed
+            pass_rate = passed / total if total > 0 else 1.0
+        else:
+            # No parseable output — use exit code
+            ok = result.returncode == 0
+            passed = 1 if ok else 0
+            failed = 0 if ok else 1
+            pass_rate = 1.0 if ok else 0.0
+
         return TestResult(
-            passed=1 if ok else 0,
-            failed=0 if ok else 1,
-            pass_rate=1.0 if ok else 0.0,
-            output=(result.stdout + result.stderr)[:2000],
+            passed=passed, failed=failed, skipped=skipped,
+            pass_rate=pass_rate, output=output[:2000],
         )
 
     def _run_linter(self, working_dir: str, project_type: str) -> LintResult:
         if project_type == "python":
             return self._run_ruff(working_dir)
+        if project_type == "node":
+            return self._run_eslint(working_dir)
         return LintResult()
+
+    def _run_eslint(self, working_dir: str) -> LintResult:
+        if not shutil.which("npx"):
+            return LintResult()
+        try:
+            result = subprocess.run(
+                ["npx", "eslint", ".", "--format=json", "--no-error-on-unmatched-pattern"],
+                cwd=working_dir, capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return LintResult()
+
+        errors = 0
+        warnings = 0
+        try:
+            issues = json.loads(result.stdout) if result.stdout.strip() else []
+            for file_result in issues:
+                errors += file_result.get("errorCount", 0)
+                warnings += file_result.get("warningCount", 0)
+        except (json.JSONDecodeError, TypeError):
+            errors = len(result.stdout.strip().splitlines())
+
+        total_issues = errors + warnings
+        score = max(0.0, 1.0 - total_issues / 100.0)
+
+        return LintResult(
+            errors=errors, warnings=warnings, score=score,
+            output=(result.stdout + result.stderr)[:2000],
+        )
 
     def _run_ruff(self, working_dir: str) -> LintResult:
         if not shutil.which("ruff"):
@@ -412,7 +502,29 @@ class CodePlugin(EvaluatorPlugin):
     def _run_typecheck(self, working_dir: str, project_type: str) -> TypecheckResult:
         if project_type == "python" and shutil.which("mypy"):
             return self._run_mypy(working_dir)
+        if project_type == "node" and shutil.which("npx"):
+            return self._run_tsc(working_dir)
         return TypecheckResult()
+
+    def _run_tsc(self, working_dir: str) -> TypecheckResult:
+        try:
+            result = subprocess.run(
+                ["npx", "tsc", "--noEmit", "--pretty", "false"],
+                cwd=working_dir, capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return TypecheckResult()
+
+        error_count = 0
+        for line in result.stdout.splitlines():
+            if ": error TS" in line:
+                error_count += 1
+
+        return TypecheckResult(
+            passed=result.returncode == 0,
+            errors=error_count,
+            output=(result.stdout + result.stderr)[:2000],
+        )
 
     def _run_mypy(self, working_dir: str) -> TypecheckResult:
         try:
