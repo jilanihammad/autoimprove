@@ -53,7 +53,7 @@ class IndexerAgent(BaseAgent):
                 files_preview = ", ".join(Path(f).name for f in batches[i][:3])
                 if len(batches[i]) > 3:
                     files_preview += f" +{len(batches[i]) - 3}"
-                table.add_row(icon, f"Batch {i+1}: {msg} [{files_preview}]")
+                table.add_row(icon, f"Batch {i+1} ({len(batches[i])} files): {msg} [{files_preview}]")
             done = sum(1 for _, (ic, _) in status.items() if ic == "✓")
             failed = sum(1 for _, (ic, _) in status.items() if ic == "✗")
             table.add_row("", f"\n{done}/{len(batches)} complete, {len(summaries)} summaries")
