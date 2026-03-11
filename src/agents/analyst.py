@@ -24,16 +24,18 @@ class AnalystAgent(BaseAgent):
         project_memory: str,
         working_dir: str,
     ) -> list[dict]:
-        """Analyze codebase and produce a prioritized improvement backlog.
+        """Analyze codebase and produce a prioritized improvement backlog."""
+        from rich.live import Live
+        from rich.spinner import Spinner
 
-        Returns a list of dicts with: title, description, files, priority, category.
-        """
-        click.echo("  ⏳ Analyst reviewing codebase...", nl=False)
-        prompt = self._build_prompt(semantic_index, program_md, eval_anchors_agent, project_memory)
-        result = self.invoke(prompt, working_dir)
+        spinner = Spinner("dots", text="Analyst agent reviewing codebase and building backlog...")
+
+        with Live(spinner, refresh_per_second=4):
+            prompt = self._build_prompt(semantic_index, program_md, eval_anchors_agent, project_memory)
+            result = self.invoke(prompt, working_dir)
 
         if not result.success:
-            click.echo(f" failed ({result.error or 'unknown'})")
+            click.echo(f"  ✗ Analyst failed ({result.error or 'unknown'})")
             return []
 
         parsed = self.parse_json(result.output)
@@ -43,7 +45,7 @@ class AnalystAgent(BaseAgent):
         elif isinstance(parsed, list):
             items = parsed
 
-        click.echo(f" {len(items)} issues identified ({result.duration_seconds:.0f}s)")
+        click.echo(f"  ✓ {len(items)} issues identified ({result.duration_seconds:.0f}s)")
         return items
 
     def _build_prompt(

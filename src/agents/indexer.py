@@ -19,7 +19,7 @@ from src.config import Config
 
 class IndexerAgent(BaseAgent):
     BATCH_SIZE = 8
-    MAX_FILE_CHARS = 3000
+    MAX_FILE_CHARS = 6000
     MAX_PARALLEL = 4
 
     def __init__(self, config: Config) -> None:

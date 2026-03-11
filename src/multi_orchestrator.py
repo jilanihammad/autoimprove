@@ -167,20 +167,35 @@ def run_multi_agent_loop(
         gate_result = None
         review_result = None
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            gates_future = pool.submit(
-                _run_gates_and_policy, plugin, diff, targets, wd, config,
-            )
-            review_future = pool.submit(
-                reviewer.run, diff.raw_diff[:6000], item, anchors_judge,
-                {f: summaries.get(f, "") for f in diff.files_changed},
-            )
+        from rich.live import Live
+        from rich.table import Table
 
-            gate_result = gates_future.result()
-            review_result = review_future.result()
+        eval_status = {"gates": "🔄 running...", "reviewer": "🔄 running..."}
+
+        def build_eval_table() -> Table:
+            t = Table(show_header=False, box=None, padding=(0, 1))
+            t.add_row("│", f"  Hard gates: {eval_status['gates']}")
+            t.add_row("│", f"  Reviewer:   {eval_status['reviewer']}")
+            return t
+
+        with Live(build_eval_table(), refresh_per_second=2):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                gates_future = pool.submit(
+                    _run_gates_and_policy, plugin, diff, targets, wd, config,
+                )
+                review_future = pool.submit(
+                    reviewer.run, diff.raw_diff[:6000], item, anchors_judge,
+                    {f: summaries.get(f, "") for f in diff.files_changed},
+                )
+
+                gate_result = gates_future.result()
+                eval_status["gates"] = "✓ done" if gate_result["passed"] else f"✗ failed: {', '.join(gate_result['failures'][:2])}"
+
+                review_result = review_future.result()
+                eval_status["reviewer"] = f"✓ {review_result.verdict}" if review_result.verdict == "accept" else f"✗ {review_result.verdict}"
 
         eval_time = time.monotonic() - t0
-        click.echo(f" {eval_time:.0f}s")
+        click.echo(f"│ Evaluation complete ({eval_time:.0f}s)")
 
         # Decision
         hypothesis = item.title
