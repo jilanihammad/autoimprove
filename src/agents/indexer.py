@@ -185,15 +185,20 @@ class IndexerAgent(BaseAgent):
             if parsed:
                 return parsed
 
-        # Last resort: use raw output as summary for single-file batches
-        if len(batch) == 1 and result.success and result.output.strip():
-            # Strip any JSON attempts, just use the text
-            text = result.output.strip()[:500]
-            return {batch[0]: text}
+        # Last resort: use raw output as summary
+        if result.success and result.output.strip():
+            output = result.output.strip()
+            if len(batch) == 1:
+                return {batch[0]: output[:500]}
+            # Multi-file: try fallback parse, then assign raw text to all files
+            fallback = self._fallback_parse(output, list(file_contents.keys()))
+            if fallback:
+                return fallback
+            # Absolute last resort: give every file the same raw summary
+            per_file = output[:300]
+            return {f: per_file for f in file_contents}
 
-        return self._fallback_parse(
-            result.output if result.success else "", list(file_contents.keys())
-        )
+        return {}
 
     def _read_batch(self, files: list[str], wd: Path) -> dict[str, str]:
         """Read files for a batch. Each file gets a fair share of the char budget."""
