@@ -117,12 +117,31 @@ def run_autoimprove(config: Config) -> None:
         click.echo(f"Calibrations: {len(anchors.calibrations)} from past feedback")
 
     try:
-        # 5. Grounding phase
-        criteria = run_grounding_phase(run_ctx, plugin, agent, criteria_mgr, targets, config)
+        if config.orchestration_mode == "multi":
+            # Multi-agent pipeline
+            from src.multi_orchestrator import run_multi_agent_grounding, run_multi_agent_loop
 
-        # 6. Autonomous loop
-        signal.signal(signal.SIGINT, _signal_handler)
-        run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem, anchors, repo_index)
+            program_path = Path(repo_path) / "program.md"
+            program_md = program_path.read_text() if program_path.exists() else ""
+
+            summaries, backlog = run_multi_agent_grounding(
+                run_ctx, config, targets, program_md, anchors, project_mem,
+            )
+
+            if not backlog.has_pending():
+                click.echo("Analyst produced no actionable items.", err=True)
+                run_ctx.stop_reason = "Empty backlog"
+            else:
+                signal.signal(signal.SIGINT, _signal_handler)
+                run_multi_agent_loop(
+                    run_ctx, plugin, config, targets, backlog,
+                    summaries, anchors, search_mem,
+                )
+        else:
+            # Single-agent mode (original)
+            criteria = run_grounding_phase(run_ctx, plugin, agent, criteria_mgr, targets, config)
+            signal.signal(signal.SIGINT, _signal_handler)
+            run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem, anchors, repo_index)
 
     except KeyboardInterrupt:
         run_ctx.stop_reason = "User interrupt"

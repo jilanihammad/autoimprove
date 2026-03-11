@@ -48,6 +48,7 @@ def sample_repo(tmp_path):
         "llm_judge_model": "mock",
         "llm_judge_runs": 1,
         "grounding_mode": "auto",
+        "orchestration_mode": "single",
         "target_paths": ["."],
         "exclude_paths": ["tests/", ".autoimprove/"],
         "protected_paths": ["*.lock"],

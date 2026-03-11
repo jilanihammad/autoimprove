@@ -31,6 +31,7 @@ class Config(BaseModel):
     llm_judge_model: str = "claude-sonnet"
     llm_judge_runs: int = Field(default=3, ge=1)
     grounding_mode: Literal["interactive", "auto"] = "interactive"
+    orchestration_mode: Literal["single", "multi"] = "multi"
 
     # Targets
     target_paths: list[str]
