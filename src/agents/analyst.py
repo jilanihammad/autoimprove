@@ -38,15 +38,52 @@ class AnalystAgent(BaseAgent):
             click.echo(f"  ✗ Analyst failed ({result.error or 'unknown'})")
             return []
 
-        parsed = self.parse_json(result.output)
-        items = []
-        if isinstance(parsed, dict):
-            items = parsed.get("backlog", [])
-        elif isinstance(parsed, list):
-            items = parsed
+        items = self._extract_backlog(result.output)
+
+        if not items:
+            # Retry with stricter prompt
+            click.echo(f"  ⚠ Could not parse backlog, retrying...")
+            retry_prompt = prompt + "\n\nCRITICAL: Respond with ONLY valid JSON. No explanation, no markdown fences. Just the raw JSON object with a 'backlog' array."
+            with Live(Spinner("dots", text="Analyst retrying..."), refresh_per_second=4):
+                result = self.invoke(retry_prompt, working_dir)
+            if result.success:
+                items = self._extract_backlog(result.output)
+
+        if not items:
+            click.echo(f"  ✗ Analyst produced no parseable backlog after retry")
+            # Save raw output for debugging
+            debug_path = Path(working_dir).parent / "analyst_raw_output.txt" if working_dir else None
+            if debug_path:
+                try:
+                    debug_path.write_text(result.output[:5000] if result.success else f"ERROR: {result.error}")
+                except OSError:
+                    pass
+            return []
 
         click.echo(f"  ✓ {len(items)} issues identified ({result.duration_seconds:.0f}s)")
         return items
+
+    def _extract_backlog(self, output: str) -> list[dict]:
+        """Try multiple strategies to extract backlog items from output."""
+        parsed = self.parse_json(output)
+
+        # Strategy 1: {"backlog": [...]}
+        if isinstance(parsed, dict) and "backlog" in parsed:
+            items = parsed["backlog"]
+            if isinstance(items, list) and items:
+                return items
+
+        # Strategy 2: direct array [...]
+        if isinstance(parsed, list) and parsed:
+            return parsed
+
+        # Strategy 3: any key containing a list of dicts with "title"
+        if isinstance(parsed, dict):
+            for v in parsed.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict) and "title" in v[0]:
+                    return v
+
+        return []
 
     def _build_prompt(
         self, semantic_index: str, program_md: str, eval_anchors: str, project_memory: str,
