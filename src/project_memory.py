@@ -48,10 +48,12 @@ class ProjectMemory:
 
     MAX_HYPOTHESES_PER_RUN = 20
     MAX_RUNS = 50
+    MAX_CALIBRATIONS = 100
 
     def __init__(self, project_root: str) -> None:
         self.memory_path = Path(project_root) / ".autoimprove" / "memory.json"
         self.runs: list[RunSummary] = []
+        self.calibrations: list[dict] = []
         self._load()
 
     def _load(self) -> None:
@@ -61,18 +63,42 @@ class ProjectMemory:
             with open(self.memory_path) as f:
                 data = json.load(f)
             self.runs = [RunSummary(**r) for r in data.get("runs", [])]
+            self.calibrations = data.get("calibrations", [])
         except (json.JSONDecodeError, TypeError, KeyError):
             self.runs = []
+            self.calibrations = []
 
     def save(self) -> None:
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
-        # Keep only the most recent runs
         trimmed = self.runs[-self.MAX_RUNS:]
+        cals = self.calibrations[-self.MAX_CALIBRATIONS:]
         with open(self.memory_path, "w") as f:
-            json.dump({"runs": [asdict(r) for r in trimmed]}, f, indent=2)
+            json.dump({
+                "runs": [asdict(r) for r in trimmed],
+                "calibrations": cals,
+            }, f, indent=2)
 
     def record_run(self, summary: RunSummary) -> None:
         self.runs.append(summary)
+        self.save()
+
+    def record_calibration(
+        self, run_id: str, hypothesis: str, direction: str, explanation: str
+    ) -> None:
+        """Record user feedback on a false positive/negative.
+
+        Args:
+            direction: 'positive' (was accepted but shouldn't have been)
+                       or 'negative' (was rejected but should have been accepted)
+            explanation: user's reason why
+        """
+        self.calibrations.append({
+            "run_id": run_id,
+            "hypothesis": hypothesis,
+            "direction": direction,
+            "explanation": explanation,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
         self.save()
 
     def get_prompt_context(self, max_runs: int = 5) -> str:

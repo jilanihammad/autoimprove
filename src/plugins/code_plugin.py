@@ -320,8 +320,35 @@ class CodePlugin(EvaluatorPlugin):
         if project_type == "python":
             return self._run_pytest(working_dir)
         if project_type == "node":
-            return self._run_npm_test(working_dir)
+            test_dir = self._find_test_dir(working_dir)
+            return self._run_npm_test(test_dir)
         return TestResult()
+
+    def _find_test_dir(self, working_dir: str) -> str:
+        """Find the directory containing package.json with a test script."""
+        root = Path(working_dir)
+        # Check root first
+        pkg = root / "package.json"
+        if pkg.exists():
+            try:
+                data = json.loads(pkg.read_text())
+                if data.get("scripts", {}).get("test"):
+                    return working_dir
+            except (json.JSONDecodeError, OSError):
+                pass
+        # Search one level deep for a package.json with a test script
+        for child in sorted(root.iterdir()):
+            if not child.is_dir() or child.name in ("node_modules", ".next", ".autoimprove"):
+                continue
+            pkg = child / "package.json"
+            if pkg.exists():
+                try:
+                    data = json.loads(pkg.read_text())
+                    if data.get("scripts", {}).get("test"):
+                        return str(child)
+                except (json.JSONDecodeError, OSError):
+                    continue
+        return working_dir
 
     def _run_pytest(self, working_dir: str) -> TestResult:
         cmd = ["python", "-m", "pytest", "--tb=short", "-q"]

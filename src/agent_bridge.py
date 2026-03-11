@@ -106,14 +106,18 @@ class AgentBridge:
         criteria_summary: str,
         previous_outcomes: list[str],
         project_memory: str = "",
+        eval_anchors: str = "",
+        repo_index: str = "",
     ) -> str:
         outcomes_text = "\n".join(previous_outcomes[-5:]) if previous_outcomes else "None yet."
         memory_section = f"\n## Project Memory (from previous runs)\n{project_memory}\n" if project_memory else ""
+        anchors_section = f"\n{eval_anchors}\n" if eval_anchors else ""
+        index_section = f"\n## Codebase Map\n{repo_index}\n" if repo_index else ""
         return f"""# AutoImprove — Iteration {iteration}
 
 ## Your Instructions
 {program_md}
-
+{anchors_section}{index_section}
 ## Evaluation Criteria
 Your changes will be evaluated against these criteria:
 {criteria_summary}

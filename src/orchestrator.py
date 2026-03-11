@@ -10,6 +10,7 @@ import json
 import re
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,12 +21,14 @@ from src.agent_bridge import AgentBridge, AgentRequest
 from src.config import Config
 from src.eval.criteria import CriteriaItem, CriteriaManager
 from src.eval.engine import AcceptanceEngine
+from src.eval.eval_anchors import EvalAnchors, load_eval_anchors
 from src.eval.llm_judge import LLMJudge
 from src.eval.search_memory import SearchMemory
 from src.plugins.base import EvaluatorPlugin
 from src.plugins.registry import PluginRegistry
 from src.preflight import run_preflight
 from src.project_memory import ProjectMemory, build_run_summary
+from src.repo_index import get_or_generate_index
 from src.run_context import RunContext
 from src.types import Decision, RunStatus
 
@@ -86,6 +89,12 @@ def run_autoimprove(config: Config) -> None:
     targets = detected[plugin_name]
     click.echo(f"Plugin: {plugin.name} ({len(targets)} targets)")
 
+    # 3b. Generate repo index
+    click.echo("Generating codebase index...", nl=False)
+    index_path = run_ctx.run_dir / "repo_index.md"
+    repo_index = get_or_generate_index(targets, str(run_ctx.worktree_path), index_path)
+    click.echo(f" done ({len(repo_index)} chars)")
+
     # 4. Setup components
     agent = AgentBridge(config)
     llm_judge = LLMJudge(config)
@@ -99,13 +108,21 @@ def run_autoimprove(config: Config) -> None:
     else:
         click.echo("Project memory: first run")
 
+    # 4b. Load eval anchors + merge calibrations from memory
+    anchors = load_eval_anchors(repo_path)
+    anchors.calibrations = project_mem.calibrations
+    if anchors.better_means or anchors.worse_means or anchors.must_preserve:
+        click.echo(f"Eval anchors: {len(anchors.better_means)} better, {len(anchors.worse_means)} worse, {len(anchors.must_preserve)} must-preserve")
+    if anchors.calibrations:
+        click.echo(f"Calibrations: {len(anchors.calibrations)} from past feedback")
+
     try:
         # 5. Grounding phase
         criteria = run_grounding_phase(run_ctx, plugin, agent, criteria_mgr, targets, config)
 
         # 6. Autonomous loop
         signal.signal(signal.SIGINT, _signal_handler)
-        run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem)
+        run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem, anchors, repo_index)
 
     except KeyboardInterrupt:
         run_ctx.stop_reason = "User interrupt"
@@ -163,7 +180,9 @@ def run_grounding_phase(
 
     # 1. Capture baseline
     click.echo("Capturing baseline metrics...")
+    click.echo("  ⏳ Running tests...", nl=False)
     baseline = plugin.baseline(targets, str(run_ctx.worktree_path))
+    click.echo(" done")
     with open(run_ctx.baseline_path, "w") as f:
         json.dump({
             "plugin_name": baseline.plugin_name,
@@ -292,11 +311,15 @@ def run_autonomous_loop(
     config: Config,
     targets: list[str],
     project_mem: ProjectMemory,
+    anchors: EvalAnchors,
+    repo_index: str,
 ) -> None:
     """The heart of AutoImprove: iterate until a stop condition is met."""
     program_path = Path(run_ctx.repo_path) / "program.md"
     program_md = program_path.read_text() if program_path.exists() else ""
     project_memory_context = project_mem.get_prompt_context()
+    anchors_for_judge = anchors.for_judge_prompt()
+    anchors_for_agent = anchors.for_agent_prompt()
 
     while True:
         # Check stop conditions
@@ -306,8 +329,11 @@ def run_autonomous_loop(
             break
 
         iteration = run_ctx.current_iteration
+        budget = run_ctx.budget_remaining_minutes()
+        click.echo(f"\n┌─ Iteration {iteration} ({'%.0f' % budget}min remaining) ─────────────────")
 
         # 1. Build prompt
+        click.echo("│ ⏳ Building prompt...", nl=False)
         prompt = agent.build_improvement_prompt(
             program_md=program_md,
             search_memory_summary=search_mem.get_summary_for_prompt(),
@@ -315,9 +341,14 @@ def run_autonomous_loop(
             criteria_summary=criteria_mgr.get_current().to_summary_string(),
             previous_outcomes=_recent_outcomes(search_mem),
             project_memory=project_memory_context,
+            eval_anchors=anchors_for_agent,
+            repo_index=repo_index,
         )
+        click.echo(" done")
 
         # 2. Invoke agent
+        click.echo(f"│ ⏳ Agent working (timeout: {config.agent_timeout_seconds}s)...", nl=False)
+        t0 = time.monotonic()
         request = AgentRequest(
             prompt=prompt,
             working_dir=str(run_ctx.worktree_path),
@@ -325,8 +356,12 @@ def run_autonomous_loop(
             mode="modify",
         )
         response = agent.invoke(request)
+        agent_time = time.monotonic() - t0
+        click.echo(f" {agent_time:.0f}s")
 
         if not response.success:
+            reason_short = (response.error or "Unknown error")[:120]
+            click.echo(f"│ ✗ Agent failed: {reason_short}")
             search_mem.record_attempt(
                 iteration=iteration,
                 hypothesis="Agent invocation failed",
@@ -336,7 +371,7 @@ def run_autonomous_loop(
                 score=None, confidence=None,
             )
             run_ctx.record_reject()
-            _print_iteration(iteration, "REJECTED:agent", "Agent failed", run_ctx)
+            click.echo(f"└─ REJECTED (agent error) | Accepts: {run_ctx.total_accepts}, Rejects: {run_ctx.total_rejects}")
 
             # Check for repeated identical failures — ask user for help
             if config.grounding_mode != "auto" and _should_ask_user(search_mem, "rejected_agent_error"):
@@ -349,13 +384,14 @@ def run_autonomous_loop(
                     break
                 elif action == "skip":
                     continue
-                # "retry" falls through to next iteration
             continue
 
         # 3. Capture diff
+        click.echo("│ ⏳ Checking diff...", nl=False)
         diff = git_ops.get_diff(str(run_ctx.worktree_path), run_ctx.accepted_state_sha)
 
         if not diff.files_changed:
+            click.echo(" no changes")
             search_mem.record_attempt(
                 iteration=iteration,
                 hypothesis="No changes made",
@@ -365,13 +401,18 @@ def run_autonomous_loop(
                 score=None, confidence=None,
             )
             run_ctx.record_reject()
-            _print_iteration(iteration, "REJECTED:empty", "No changes", run_ctx)
+            click.echo(f"└─ REJECTED (no changes) | Accepts: {run_ctx.total_accepts}, Rejects: {run_ctx.total_rejects}")
             continue
+
+        click.echo(f" {len(diff.files_changed)} files, +{diff.lines_added}/-{diff.lines_removed} lines")
 
         # 4. Extract hypothesis
         hypothesis = _extract_hypothesis(response.output)
+        click.echo(f"│ 💡 Hypothesis: {hypothesis[:100]}")
 
         # 5. Evaluate
+        click.echo("│ ⏳ Running evaluation (tests, lint, typecheck, LLM judge)...", nl=False)
+        t0 = time.monotonic()
         criteria_dict = criteria_mgr.get_current().to_dict()
         decision = engine.evaluate(
             diff=diff,
@@ -380,9 +421,15 @@ def run_autonomous_loop(
             criteria=criteria_dict,
             criteria_version=criteria_mgr.get_current().version,
             working_dir=str(run_ctx.worktree_path),
+            eval_anchors_text=anchors_for_judge,
         )
+        eval_time = time.monotonic() - t0
+        click.echo(f" {eval_time:.0f}s")
 
         # 6. Act on decision
+        score_str = f"{decision.composite_score:.2f}" if decision.composite_score else "-"
+        conf_str = f"{decision.confidence:.2f}" if decision.confidence else "-"
+
         if decision.decision == Decision.ACCEPT:
             sha = git_ops.commit(
                 str(run_ctx.worktree_path),
@@ -391,10 +438,15 @@ def run_autonomous_loop(
             run_ctx.record_accept(sha)
             if decision.composite_score is not None:
                 run_ctx.current_composite_score = decision.composite_score
-            tag = "ACCEPTED"
+            click.echo(f"│ ✅ ACCEPTED (score: {score_str}, confidence: {conf_str})")
+            click.echo(f"│    Files: {', '.join(diff.files_changed[:5])}")
         else:
             run_ctx.record_reject()
-            tag = f"REJECTED:{decision.reason}"
+            detail_str = json.dumps(decision.detail)[:150]
+            click.echo(f"│ ❌ REJECTED: {decision.reason}")
+            click.echo(f"│    Detail: {detail_str}")
+
+        click.echo(f"└─ Accepts: {run_ctx.total_accepts}, Rejects: {run_ctx.total_rejects} | Score: {score_str}, Conf: {conf_str}")
 
         # 7. Update search memory
         search_mem.record_attempt(
@@ -430,16 +482,7 @@ def run_autonomous_loop(
                 run_ctx.stop_reason = "User stopped after repeated rejections"
                 break
 
-        # 9. Print progress
-        score_str = f"{decision.composite_score:.2f}" if decision.composite_score else "-"
-        conf_str = f"{decision.confidence:.2f}" if decision.confidence else "-"
-        _print_iteration(
-            iteration, tag,
-            f"{hypothesis[:60]} (score:{score_str} conf:{conf_str})",
-            run_ctx,
-        )
-
-        # 10. Save state
+        # 9. Save state
         run_ctx.save_state()
         search_mem.save()
 

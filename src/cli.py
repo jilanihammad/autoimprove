@@ -151,5 +151,65 @@ def status() -> None:
             click.echo(f"{run_dir.name:<30} (corrupt state)")
 
 
+@main.command()
+@click.argument("run_id")
+def calibrate(run_id: str) -> None:
+    """Review a run's accepted changes and flag false positives/negatives."""
+    repo_path = str(Path.cwd().resolve())
+    run_dir = Path(repo_path) / ".autoimprove" / "runs" / run_id
+    mem_path = run_dir / "search_memory.json"
+
+    if not mem_path.exists():
+        click.echo(f"Run not found: {run_id}", err=True)
+        raise SystemExit(1)
+
+    from src.eval.search_memory import SearchMemory
+    from src.project_memory import ProjectMemory
+
+    search_mem = SearchMemory.load(mem_path)
+    project_mem = ProjectMemory(repo_path)
+
+    accepted = [h for h in search_mem.hypotheses if h.outcome == "accepted"]
+    rejected = [h for h in search_mem.hypotheses if h.outcome != "accepted"]
+
+    if not accepted and not rejected:
+        click.echo("No hypotheses to review.")
+        return
+
+    count = 0
+
+    if accepted:
+        click.echo(f"\n── Accepted Changes ({len(accepted)}) ──")
+        click.echo("Flag any that should NOT have been accepted.\n")
+        for h in accepted:
+            score = f" (score: {h.composite_score:.2f})" if h.composite_score else ""
+            click.echo(f"  [{h.iteration}] {h.hypothesis[:100]}{score}")
+            files = ", ".join(h.files_actually_modified[:3])
+            if files:
+                click.echo(f"       Files: {files}")
+            flag = click.prompt("  Flag as bad? [y/N/q]", default="n").strip().lower()
+            if flag == "q":
+                break
+            if flag == "y":
+                reason = click.prompt("  Why was this bad?")
+                project_mem.record_calibration(run_id, h.hypothesis, "positive", reason)
+                count += 1
+
+    if rejected and click.confirm("\nReview rejected changes too?", default=False):
+        click.echo(f"\n── Rejected Changes ({len(rejected)}) ──")
+        click.echo("Flag any that SHOULD have been accepted.\n")
+        for h in rejected[:20]:
+            click.echo(f"  [{h.iteration}] {h.hypothesis[:100]} — {h.outcome}")
+            flag = click.prompt("  Should have been accepted? [y/N/q]", default="n").strip().lower()
+            if flag == "q":
+                break
+            if flag == "y":
+                reason = click.prompt("  Why was this actually good?")
+                project_mem.record_calibration(run_id, h.hypothesis, "negative", reason)
+                count += 1
+
+    click.echo(f"\n✓ Recorded {count} calibration(s). These will shape future evaluations.")
+
+
 if __name__ == "__main__":
     main()
