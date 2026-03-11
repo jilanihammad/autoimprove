@@ -21,6 +21,7 @@ class IndexerAgent(BaseAgent):
     BATCH_SIZE = 8
     MAX_FILE_CHARS = 6000
     MAX_PARALLEL = 4
+    MAX_BATCH_CHARS = 30000  # total chars per batch prompt
 
     def __init__(self, config: Config) -> None:
         super().__init__(config, "indexer")
@@ -29,15 +30,11 @@ class IndexerAgent(BaseAgent):
         """Produce semantic summaries for all target files (parallel batches)."""
         from rich.live import Live
         from rich.table import Table
-        from rich.text import Text
 
         wd = Path(working_dir)
         summaries: dict[str, str] = {}
 
-        batches = [
-            target_files[i : i + self.BATCH_SIZE]
-            for i in range(0, len(target_files), self.BATCH_SIZE)
-        ]
+        batches = self._build_smart_batches(target_files, wd)
 
         # Track status per batch
         status: dict[int, tuple[str, str]] = {
@@ -55,7 +52,6 @@ class IndexerAgent(BaseAgent):
                     files_preview += f" +{len(batches[i]) - 3}"
                 table.add_row(icon, f"Batch {i+1} ({len(batches[i])} files): {msg} [{files_preview}]")
             done = sum(1 for _, (ic, _) in status.items() if ic == "✓")
-            failed = sum(1 for _, (ic, _) in status.items() if ic == "✗")
             table.add_row("", f"\n{done}/{len(batches)} complete, {len(summaries)} summaries")
             return table
 
@@ -81,6 +77,35 @@ class IndexerAgent(BaseAgent):
 
         click.echo(f"  ✓ Total: {len(summaries)}/{len(target_files)} files indexed")
         return summaries
+
+    def _build_smart_batches(self, files: list[str], wd: Path) -> list[list[str]]:
+        """Group files into batches respecting both file count and total char limits."""
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_chars = 0
+
+        # Sort by size so large files get their own batch
+        sized = []
+        for f in files:
+            try:
+                size = min((wd / f).stat().st_size, self.MAX_FILE_CHARS)
+            except OSError:
+                size = 0
+            sized.append((f, size))
+        sized.sort(key=lambda x: -x[1])
+
+        for f, size in sized:
+            if current_batch and (len(current_batch) >= self.BATCH_SIZE or current_chars + size > self.MAX_BATCH_CHARS):
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+            current_batch.append(f)
+            current_chars += size
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def _index_batch_tracked(
         self, batch_num: int, batch: list[str], wd: Path, working_dir: str, status: dict
