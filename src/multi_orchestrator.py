@@ -46,7 +46,8 @@ def run_multi_agent_grounding(
     # 1. Indexer
     click.echo("Phase 1: Semantic Indexing")
     indexer = IndexerAgent(config)
-    summaries = indexer.run(targets, str(run_ctx.worktree_path))
+    cache_path = run_ctx.run_dir.parent.parent / "index_cache.json"
+    summaries = indexer.run(targets, str(run_ctx.worktree_path), cache_path)
     semantic_index = indexer.format_index(summaries, targets, str(run_ctx.worktree_path))
 
     # Save index
