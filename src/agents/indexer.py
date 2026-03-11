@@ -27,6 +27,10 @@ class IndexerAgent(BaseAgent):
 
     def run(self, target_files: list[str], working_dir: str) -> dict[str, str]:
         """Produce semantic summaries for all target files (parallel batches)."""
+        from rich.live import Live
+        from rich.table import Table
+        from rich.text import Text
+
         wd = Path(working_dir)
         summaries: dict[str, str] = {}
 
@@ -35,32 +39,59 @@ class IndexerAgent(BaseAgent):
             for i in range(0, len(target_files), self.BATCH_SIZE)
         ]
 
-        click.echo(f"  Indexing {len(target_files)} files in {len(batches)} batches ({self.MAX_PARALLEL} parallel)...")
+        # Track status per batch
+        status: dict[int, tuple[str, str]] = {
+            i: ("⏳", "waiting") for i in range(len(batches))
+        }
 
-        with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL) as pool:
-            futures = {
-                pool.submit(self._index_batch, batch, wd, working_dir): batch_num
-                for batch_num, batch in enumerate(batches)
-            }
+        def build_table() -> Table:
+            table = Table(show_header=False, box=None, padding=(0, 1))
+            table.add_column(width=3)
+            table.add_column()
+            for i in range(len(batches)):
+                icon, msg = status[i]
+                files_preview = ", ".join(Path(f).name for f in batches[i][:3])
+                if len(batches[i]) > 3:
+                    files_preview += f" +{len(batches[i]) - 3}"
+                table.add_row(icon, f"Batch {i+1}: {msg} [{files_preview}]")
+            done = sum(1 for _, (ic, _) in status.items() if ic == "✓")
+            failed = sum(1 for _, (ic, _) in status.items() if ic == "✗")
+            table.add_row("", f"\n{done}/{len(batches)} complete, {len(summaries)} summaries")
+            return table
 
-            for future in as_completed(futures):
-                batch_num = futures[future]
-                try:
-                    batch_summaries = future.result()
-                    summaries.update(batch_summaries)
-                    click.echo(f"  ✓ Batch {batch_num + 1}/{len(batches)}: {len(batch_summaries)} summaries")
-                except Exception as e:
-                    click.echo(f"  ✗ Batch {batch_num + 1}/{len(batches)}: error ({e})")
+        click.echo(f"  Indexing {len(target_files)} files in {len(batches)} batches ({self.MAX_PARALLEL} parallel)")
+
+        with Live(build_table(), refresh_per_second=2, console=None) as live:
+            with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL) as pool:
+                futures = {}
+                for batch_num, batch in enumerate(batches):
+                    status[batch_num] = ("🔄", "queued")
+                    futures[pool.submit(self._index_batch_tracked, batch_num, batch, wd, working_dir, status)] = batch_num
+                    live.update(build_table())
+
+                for future in as_completed(futures):
+                    batch_num = futures[future]
+                    try:
+                        batch_summaries = future.result()
+                        summaries.update(batch_summaries)
+                        status[batch_num] = ("✓", f"{len(batch_summaries)} summaries")
+                    except Exception as e:
+                        status[batch_num] = ("✗", f"error: {e}")
+                    live.update(build_table())
 
         click.echo(f"  ✓ Total: {len(summaries)}/{len(target_files)} files indexed")
         return summaries
 
-    def _index_batch(self, batch: list[str], wd: Path, working_dir: str) -> dict[str, str]:
-        """Index a single batch. Called from thread pool."""
+    def _index_batch_tracked(
+        self, batch_num: int, batch: list[str], wd: Path, working_dir: str, status: dict
+    ) -> dict[str, str]:
+        """Index a single batch, updating status dict for live display."""
+        status[batch_num] = ("🔄", "reading files...")
         file_contents = self._read_batch(batch, wd)
         if not file_contents:
             return {}
 
+        status[batch_num] = ("🔄", "agent working...")
         prompt = self._build_prompt(file_contents)
         result = self.invoke(prompt, working_dir)
 
@@ -69,7 +100,8 @@ class IndexerAgent(BaseAgent):
             if parsed:
                 return parsed
 
-        # Retry with stricter prompt
+        # Retry
+        status[batch_num] = ("🔄", "retrying...")
         retry_prompt = prompt + "\n\nCRITICAL: Respond with ONLY valid JSON. No explanation, no markdown fences, just the raw JSON object."
         result = self.invoke(retry_prompt, working_dir)
         if result.success:
@@ -77,7 +109,6 @@ class IndexerAgent(BaseAgent):
             if parsed:
                 return parsed
 
-        # Fallback
         return self._fallback_parse(
             result.output if result.success else "", list(file_contents.keys())
         )
