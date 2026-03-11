@@ -2,11 +2,13 @@
 
 Reads target files in batches and generates per-file summaries:
 purpose, key abstractions, dependencies, complexity hotspots.
+Batches run in parallel for speed.
 """
 
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import click
@@ -18,15 +20,13 @@ from src.config import Config
 class IndexerAgent(BaseAgent):
     BATCH_SIZE = 8
     MAX_FILE_CHARS = 3000
+    MAX_PARALLEL = 4
 
     def __init__(self, config: Config) -> None:
         super().__init__(config, "indexer")
 
     def run(self, target_files: list[str], working_dir: str) -> dict[str, str]:
-        """Produce semantic summaries for all target files.
-
-        Returns ``{filepath: summary_text}``.
-        """
+        """Produce semantic summaries for all target files (parallel batches)."""
         wd = Path(working_dir)
         summaries: dict[str, str] = {}
 
@@ -35,43 +35,52 @@ class IndexerAgent(BaseAgent):
             for i in range(0, len(target_files), self.BATCH_SIZE)
         ]
 
-        for batch_num, batch in enumerate(batches):
-            click.echo(f"  ⏳ Indexing batch {batch_num + 1}/{len(batches)} ({len(batch)} files)...", nl=False)
-            file_contents = self._read_batch(batch, wd)
-            if not file_contents:
-                click.echo(" skipped (unreadable)")
-                continue
+        click.echo(f"  Indexing {len(target_files)} files in {len(batches)} batches ({self.MAX_PARALLEL} parallel)...")
 
-            prompt = self._build_prompt(file_contents)
-            result = self.invoke(prompt, working_dir)
+        with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL) as pool:
+            futures = {
+                pool.submit(self._index_batch, batch, wd, working_dir): batch_num
+                for batch_num, batch in enumerate(batches)
+            }
 
-            if not result.success:
-                click.echo(f" failed ({result.error or 'unknown'})")
-                continue
+            for future in as_completed(futures):
+                batch_num = futures[future]
+                try:
+                    batch_summaries = future.result()
+                    summaries.update(batch_summaries)
+                    click.echo(f"  ✓ Batch {batch_num + 1}/{len(batches)}: {len(batch_summaries)} summaries")
+                except Exception as e:
+                    click.echo(f"  ✗ Batch {batch_num + 1}/{len(batches)}: error ({e})")
 
+        click.echo(f"  ✓ Total: {len(summaries)}/{len(target_files)} files indexed")
+        return summaries
+
+    def _index_batch(self, batch: list[str], wd: Path, working_dir: str) -> dict[str, str]:
+        """Index a single batch. Called from thread pool."""
+        file_contents = self._read_batch(batch, wd)
+        if not file_contents:
+            return {}
+
+        prompt = self._build_prompt(file_contents)
+        result = self.invoke(prompt, working_dir)
+
+        if result.success:
             parsed = self._parse_summaries(result.output)
             if parsed:
-                summaries.update(parsed)
-                click.echo(f" {len(parsed)} summaries ({result.duration_seconds:.0f}s)")
-                continue
+                return parsed
 
-            # Retry once with stricter prompt
-            click.echo(" parse failed, retrying...", nl=False)
-            retry_prompt = prompt + "\n\nCRITICAL: Respond with ONLY valid JSON. No explanation, no markdown fences, just the raw JSON object."
-            result = self.invoke(retry_prompt, working_dir)
-            if result.success:
-                parsed = self._parse_summaries(result.output)
-                if parsed:
-                    summaries.update(parsed)
-                    click.echo(f" {len(parsed)} summaries ({result.duration_seconds:.0f}s)")
-                    continue
+        # Retry with stricter prompt
+        retry_prompt = prompt + "\n\nCRITICAL: Respond with ONLY valid JSON. No explanation, no markdown fences, just the raw JSON object."
+        result = self.invoke(retry_prompt, working_dir)
+        if result.success:
+            parsed = self._parse_summaries(result.output)
+            if parsed:
+                return parsed
 
-            # Fallback: extract whatever we can as plain text per file
-            fallback = self._fallback_parse(result.output if result.success else "", list(file_contents.keys()))
-            summaries.update(fallback)
-            click.echo(f" {len(fallback)} (fallback)")
-
-        return summaries
+        # Fallback
+        return self._fallback_parse(
+            result.output if result.success else "", list(file_contents.keys())
+        )
 
     def format_index(self, summaries: dict[str, str], target_files: list[str], working_dir: str) -> str:
         """Format summaries into a markdown codebase map."""
