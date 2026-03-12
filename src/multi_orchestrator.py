@@ -74,39 +74,60 @@ def run_multi_agent_grounding(
     backlog = Backlog()
     if raw_items:
         backlog.load_from_analyst(raw_items)
-    click.echo(f"  ✓ Backlog: {backlog.summary()}\n")
+    click.echo(f"  ✓ Backlog: {len(backlog.items)} tasks identified\n")
 
     # Save backlog
     backlog.save(run_ctx.run_dir / "backlog.json")
 
-    # Print backlog
-    for i, item in enumerate(backlog.items):
-        click.echo(f"  [{i+1}] (p={item.priority:.1f}) {item.title} ({item.category})")
-        click.echo(f"       {item.description[:120]}")
-        click.echo(f"       Files: {', '.join(item.files[:3])}")
-
-    # ── Interactive approval ──
+    # ── Interactive theme-based approval ──
     if config.grounding_mode != "auto" and backlog.has_pending():
-        click.echo("\n── Backlog Review ──")
-        click.echo("Review the proposed improvements above.")
-        action = click.prompt(
-            "Action: [a]pprove all / [r]emove items (comma-separated numbers) / [q]uit",
-            default="a",
+        # Group by category into themes
+        themes = _group_into_themes(backlog)
+
+        click.echo("── Improvement Plan ──\n")
+        click.echo("The analyst identified these improvement areas:\n")
+
+        theme_nums = []
+        for i, (theme_name, icon, goal, items) in enumerate(themes):
+            theme_nums.append(i + 1)
+            avg_p = sum(it.priority for it in items) / len(items)
+            impact = "high" if avg_p >= 0.85 else "medium" if avg_p >= 0.7 else "lower"
+            click.echo(f"  {i+1}. {icon}  {theme_name} ({len(items)} tasks, {impact} impact)")
+            click.echo(f"     Goal: {goal}")
+            click.echo(f"     Tasks:")
+            for it in items[:4]:
+                click.echo(f"       - {it.title}")
+            if len(items) > 4:
+                click.echo(f"       ... and {len(items) - 4} more")
+            click.echo()
+
+        choice = click.prompt(
+            f"Approve which themes? (e.g. '1,2' or 'all' or 'q' to quit)",
+            default="all",
         ).strip().lower()
 
-        if action == "q":
+        if choice == "q":
             click.echo("Run aborted by user.")
             run_ctx.cleanup()
             raise SystemExit(0)
-        elif action.startswith("r"):
-            # Parse item numbers to remove
+
+        if choice != "all":
             try:
-                parts = action.replace("r", "").strip().split(",")
-                to_remove = {int(x.strip()) - 1 for x in parts if x.strip().isdigit()}
-                backlog.items = [item for i, item in enumerate(backlog.items) if i not in to_remove]
-                click.echo(f"  Removed {len(to_remove)} items. Backlog: {backlog.summary()}")
-            except (ValueError, IndexError):
-                click.echo("  Could not parse, keeping all items.")
+                approved = {int(x.strip()) for x in choice.split(",")}
+            except ValueError:
+                approved = set(theme_nums)
+
+            # Remove items from non-approved themes
+            approved_categories = set()
+            for i, (_, _, _, items) in enumerate(themes):
+                if (i + 1) in approved:
+                    approved_categories.update(it.category for it in items)
+
+            removed = [it for it in backlog.items if it.category not in approved_categories]
+            backlog.items = [it for it in backlog.items if it.category in approved_categories]
+            click.echo(f"  ✓ Approved {len(backlog.items)} tasks, removed {len(removed)}")
+        else:
+            click.echo(f"  ✓ All {len(backlog.items)} tasks approved")
 
         # Show eval anchors for approval
         click.echo("\n── Evaluation Criteria ──")
@@ -321,6 +342,42 @@ def _read_files(files: list[str], working_dir: str) -> dict[str, str]:
         except OSError:
             continue
     return contents
+
+
+# Category → (theme_name, icon, goal)
+_THEME_MAP = {
+    "error_handling": ("Reliability & Error Handling", "🛡️", "Users get clear error messages instead of silent failures and crashes."),
+    "errorhandling": ("Reliability & Error Handling", "🛡️", "Users get clear error messages instead of silent failures and crashes."),
+    "validation": ("Reliability & Error Handling", "🛡️", "Users get clear error messages instead of silent failures and crashes."),
+    "complexity": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+    "performance": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+    "maintainability": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+    "readability": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+    "documentation": ("Documentation & Type Safety", "📝", "New contributors can understand the codebase faster, fewer runtime type errors."),
+    "type_safety": ("Documentation & Type Safety", "📝", "New contributors can understand the codebase faster, fewer runtime type errors."),
+}
+
+
+def _group_into_themes(backlog: Backlog) -> list[tuple[str, str, str, list]]:
+    """Group backlog items into themes. Returns [(name, icon, goal, items)]."""
+    groups: dict[str, list] = {}
+    theme_meta: dict[str, tuple[str, str]] = {}
+
+    for item in backlog.items:
+        theme_name, icon, goal = _THEME_MAP.get(
+            item.category, ("Other Improvements", "🔧", "General codebase improvements.")
+        )
+        if theme_name not in groups:
+            groups[theme_name] = []
+            theme_meta[theme_name] = (icon, goal)
+        groups[theme_name].append(item)
+
+    # Sort themes by total priority (highest first)
+    result = []
+    for name in sorted(groups, key=lambda n: -sum(it.priority for it in groups[n])):
+        icon, goal = theme_meta[name]
+        result.append((name, icon, goal, groups[name]))
+    return result
 
 
 def _run_gates_and_policy(
