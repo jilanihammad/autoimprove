@@ -26,7 +26,7 @@ from src.plugins.base import EvaluatorPlugin
 from src.policy import check_policy
 from src.project_memory import ProjectMemory
 from src.run_context import RunContext
-from src.types import Decision
+from src.types import Decision, RunStatus
 
 
 def run_multi_agent_grounding(
@@ -42,6 +42,11 @@ def run_multi_agent_grounding(
     Returns (semantic_summaries, backlog).
     """
     click.echo("\n── Multi-Agent Grounding ──")
+
+    # 0. Set baseline SHA
+    sha = git_ops.get_head_sha(str(run_ctx.worktree_path), short=False)
+    run_ctx.set_baseline(sha)
+    run_ctx.status = RunStatus.RUNNING
 
     # 1. Indexer
     click.echo("Phase 1: Semantic Indexing")
@@ -75,9 +80,60 @@ def run_multi_agent_grounding(
     backlog.save(run_ctx.run_dir / "backlog.json")
 
     # Print backlog
-    for item in backlog.items[:10]:
-        click.echo(f"  [{item.priority:.1f}] {item.title} ({item.category})")
+    for i, item in enumerate(backlog.items):
+        click.echo(f"  [{i+1}] (p={item.priority:.1f}) {item.title} ({item.category})")
+        click.echo(f"       {item.description[:120]}")
         click.echo(f"       Files: {', '.join(item.files[:3])}")
+
+    # ── Interactive approval ──
+    if config.grounding_mode != "auto" and backlog.has_pending():
+        click.echo("\n── Backlog Review ──")
+        click.echo("Review the proposed improvements above.")
+        action = click.prompt(
+            "Action: [a]pprove all / [r]emove items (comma-separated numbers) / [q]uit",
+            default="a",
+        ).strip().lower()
+
+        if action == "q":
+            click.echo("Run aborted by user.")
+            run_ctx.cleanup()
+            raise SystemExit(0)
+        elif action.startswith("r"):
+            # Parse item numbers to remove
+            try:
+                parts = action.replace("r", "").strip().split(",")
+                to_remove = {int(x.strip()) - 1 for x in parts if x.strip().isdigit()}
+                backlog.items = [item for i, item in enumerate(backlog.items) if i not in to_remove]
+                click.echo(f"  Removed {len(to_remove)} items. Backlog: {backlog.summary()}")
+            except (ValueError, IndexError):
+                click.echo("  Could not parse, keeping all items.")
+
+        # Show eval anchors for approval
+        click.echo("\n── Evaluation Criteria ──")
+        click.echo("Changes will be judged by these rules:\n")
+        if eval_anchors.better_means:
+            click.echo("  BETTER means:")
+            for b in eval_anchors.better_means:
+                click.echo(f"    ✓ {b}")
+        if eval_anchors.worse_means:
+            click.echo("  WORSE means:")
+            for w in eval_anchors.worse_means:
+                click.echo(f"    ✗ {w}")
+        if eval_anchors.must_preserve:
+            click.echo("  MUST preserve:")
+            for m in eval_anchors.must_preserve:
+                click.echo(f"    🔒 {m.get('description', str(m))}")
+
+        eval_ok = click.prompt("\nAccept these evaluation criteria? [y/n]", default="y").strip().lower()
+        if eval_ok == "n":
+            click.echo("Edit eval_anchors.yaml in your project root and re-run.")
+            run_ctx.cleanup()
+            raise SystemExit(0)
+
+        click.echo("\n✓ Backlog and criteria approved. Starting improvement loop.\n")
+
+    # Save final backlog
+    backlog.save(run_ctx.run_dir / "backlog.json")
 
     return summaries, backlog
 

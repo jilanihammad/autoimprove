@@ -74,9 +74,10 @@ Make a different approach this time.
 ## Instructions
 1. Read the files above carefully
 2. Make the specific change described in the task
-3. State what you changed (start with "Hypothesis:")
-4. Do NOT modify any files not listed above
-5. Do NOT add new dependencies
-6. Keep changes minimal and focused — do not refactor beyond the task scope
-7. Verify your changes don't break the existing API contracts
+3. Use your tools to edit the files directly — write the changes to disk
+4. State what you changed (start with "Hypothesis:")
+5. Do NOT modify any files not listed above
+6. Do NOT add new dependencies
+7. Keep changes minimal and focused — do not refactor beyond the task scope
+8. Verify your changes don't break the existing API contracts
 """
