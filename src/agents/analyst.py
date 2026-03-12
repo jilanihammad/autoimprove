@@ -6,6 +6,8 @@ then produces a prioritized list of specific, actionable improvements.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 
 from src.agents.base import BaseAgent
@@ -52,12 +54,12 @@ class AnalystAgent(BaseAgent):
         if not items:
             click.echo(f"  ✗ Analyst produced no parseable backlog after retry")
             # Save raw output for debugging
-            debug_path = Path(working_dir).parent / "analyst_raw_output.txt" if working_dir else None
-            if debug_path:
-                try:
-                    debug_path.write_text(result.output[:5000] if result.success else f"ERROR: {result.error}")
-                except OSError:
-                    pass
+            try:
+                debug_path = Path(working_dir) / ".." / "analyst_raw_output.txt"
+                debug_path.resolve().write_text(result.output[:10000] if result.success else f"ERROR: {result.error}")
+                click.echo(f"  ℹ Raw output saved to {debug_path.resolve()}")
+            except OSError:
+                pass
             return []
 
         click.echo(f"  ✓ {len(items)} issues identified ({result.duration_seconds:.0f}s)")
