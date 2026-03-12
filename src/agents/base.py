@@ -99,16 +99,19 @@ class BaseAgent:
         if "kiro" in cmd_base:
             with open(prompt_file) as f:
                 prompt_text = f.read()
-            cmd = [
+            # Coder needs tools; analysis roles get a "no tools" instruction
+            if self.role != "coder":
+                prompt_text = (
+                    "IMPORTANT: Do NOT use any tools (no code, read, grep, fs_read, execute_bash, etc). "
+                    "All the information you need is provided below. "
+                    "Analyze the input and respond with ONLY the requested JSON output.\n\n"
+                    + prompt_text
+                )
+            return [
                 "kiro-cli", "chat",
                 "--no-interactive", "--trust-all-tools", "--wrap", "never",
-            ]
-            # Analysis-only roles: disable tools so agent reasons over input
-            # instead of exploring the filesystem
-            if self.role in ("analyst", "reviewer", "indexer"):
-                cmd[cmd.index("--trust-all-tools")] = "--trust-tools="
-            cmd.append(prompt_text)
-            return cmd, False
+                prompt_text,
+            ], False
         if "codex" in cmd_base:
             return ["codex", "-q", "--prompt-file", prompt_file], False
         return [self.agent_command, prompt_file], False
