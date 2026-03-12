@@ -99,11 +99,16 @@ class BaseAgent:
         if "kiro" in cmd_base:
             with open(prompt_file) as f:
                 prompt_text = f.read()
-            return [
+            cmd = [
                 "kiro-cli", "chat",
                 "--no-interactive", "--trust-all-tools", "--wrap", "never",
-                prompt_text,
-            ], False
+            ]
+            # Analysis-only roles: disable tools so agent reasons over input
+            # instead of exploring the filesystem
+            if self.role in ("analyst", "reviewer", "indexer"):
+                cmd[cmd.index("--trust-all-tools")] = "--trust-tools="
+            cmd.append(prompt_text)
+            return cmd, False
         if "codex" in cmd_base:
             return ["codex", "-q", "--prompt-file", prompt_file], False
         return [self.agent_command, prompt_file], False
