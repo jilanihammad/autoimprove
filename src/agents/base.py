@@ -58,6 +58,9 @@ class BaseAgent:
 
     def parse_json(self, output: str) -> dict | list | None:
         """Extract JSON from agent output. Tries multiple strategies."""
+        # Strip ANSI escape codes first
+        output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+
         # Strategy 1: markdown fenced JSON block
         m = re.search(r"```(?:json)?\s*\n?([\s\S]*?)\n?\s*```", output)
         if m:
