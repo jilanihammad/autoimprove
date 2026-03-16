@@ -58,3 +58,7 @@
 {"created_at":"2026-03-10T11:15:51Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-i2l.6","issue_id":"autoimprove-i2l.9","type":"blocks"}
 {"created_at":"2026-03-10T11:15:52Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-i2l.7","issue_id":"autoimprove-i2l.9","type":"blocks"}
 {"created_at":"2026-03-10T11:15:53Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-i2l.8","issue_id":"autoimprove-i2l.9","type":"blocks"}
+{"created_at":"2026-03-16T10:43:46Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-mat","issue_id":"autoimprove-mat.1","type":"parent-child"}
+{"created_at":"2026-03-16T10:55:45Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-mat","issue_id":"autoimprove-mat.2","type":"parent-child"}
+{"created_at":"2026-03-16T10:57:10Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-mat","issue_id":"autoimprove-mat.3","type":"parent-child"}
+{"created_at":"2026-03-16T10:57:15Z","created_by":"Hammad Jilani","depends_on_id":"autoimprove-mat","issue_id":"autoimprove-mat.4","type":"parent-child"}
