@@ -101,6 +101,73 @@ class ProjectMemory:
         })
         self.save()
 
+    def get_calibration_lessons(self, plugin_name: str | None = None) -> dict:
+        """Distill calibrations into actionable guidance for the eval pipeline.
+
+        Returns a dict with keys:
+        - ``false_positive_patterns``: list of reasons for wrongly accepted changes
+        - ``false_negative_patterns``: list of reasons for wrongly rejected changes
+        - ``threshold_delta``: suggested threshold adjustment (positive = raise bar)
+        - ``judge_context``: formatted text for inclusion in judge prompts
+        - ``analyst_context``: formatted text for inclusion in analyst prompts
+        """
+        if not self.calibrations:
+            return {
+                "false_positive_patterns": [],
+                "false_negative_patterns": [],
+                "threshold_delta": 0.0,
+                "judge_context": "",
+                "analyst_context": "",
+            }
+
+        relevant = self.calibrations
+        # Could filter by plugin_name in future if calibrations store it
+
+        false_positives = [c for c in relevant if c.get("direction") == "positive"]
+        false_negatives = [c for c in relevant if c.get("direction") == "negative"]
+
+        fp_patterns = [c.get("explanation", "")[:200] for c in false_positives[-5:]]
+        fn_patterns = [c.get("explanation", "")[:200] for c in false_negatives[-5:]]
+
+        # Threshold delta: more false positives = raise bar (positive delta)
+        # More false negatives = lower bar (negative delta)
+        # Bounded to ±0.2
+        sensitivity = 0.03  # per calibration entry
+        raw_delta = len(false_positives) * sensitivity - len(false_negatives) * sensitivity
+        threshold_delta = max(-0.2, min(0.2, raw_delta))
+
+        # Build judge context
+        judge_lines = []
+        if fp_patterns:
+            judge_lines.append("CALIBRATION WARNING: The user has flagged these as false positives (were accepted but should NOT have been):")
+            for p in fp_patterns:
+                judge_lines.append(f"  - {p}")
+            judge_lines.append("Be MORE critical of similar changes.")
+        if fn_patterns:
+            judge_lines.append("CALIBRATION NOTE: The user has flagged these as false negatives (were rejected but SHOULD have been accepted):")
+            for p in fn_patterns:
+                judge_lines.append(f"  - {p}")
+            judge_lines.append("Be MORE lenient toward similar changes.")
+
+        # Build analyst context
+        analyst_lines = []
+        if fp_patterns:
+            analyst_lines.append("Past calibration — the user does NOT consider these improvements:")
+            for p in fp_patterns:
+                analyst_lines.append(f"  - {p}")
+        if fn_patterns:
+            analyst_lines.append("Past calibration — the user DOES want these kinds of changes:")
+            for p in fn_patterns:
+                analyst_lines.append(f"  - {p}")
+
+        return {
+            "false_positive_patterns": fp_patterns,
+            "false_negative_patterns": fn_patterns,
+            "threshold_delta": threshold_delta,
+            "judge_context": "\n".join(judge_lines),
+            "analyst_context": "\n".join(analyst_lines),
+        }
+
     def get_prompt_context(self, max_runs: int = 5) -> str:
         """Generate a summary for inclusion in the agent's improvement prompt."""
         if not self.runs:

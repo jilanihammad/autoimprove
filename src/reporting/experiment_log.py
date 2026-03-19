@@ -113,6 +113,34 @@ class ExperimentLog:
         return log
 
 
+class TSVLogger:
+    """Simple tab-separated experiment log — one row per iteration, human-scannable."""
+
+    HEADER = "iteration\tstatus\tscore\tconfidence\tfiles_changed\thypothesis\n"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        if not path.exists():
+            path.write_text(self.HEADER)
+
+    def log(
+        self,
+        iteration: int,
+        status: str,
+        score: float | None,
+        confidence: float | None,
+        files: list[str],
+        hypothesis: str,
+    ) -> None:
+        score_s = f"{score:.4f}" if score is not None else "-"
+        conf_s = f"{confidence:.2f}" if confidence is not None else "-"
+        files_s = ",".join(files[:5]) or "-"
+        hyp_s = hypothesis[:120].replace("\t", " ").replace("\n", " ")
+        line = f"{iteration}\t{status}\t{score_s}\t{conf_s}\t{files_s}\t{hyp_s}\n"
+        with open(self.path, "a") as f:
+            f.write(line)
+
+
 def create_entry(
     iteration: int,
     hypothesis: str,

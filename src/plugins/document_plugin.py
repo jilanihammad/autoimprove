@@ -164,6 +164,104 @@ class DocumentPlugin(EvaluatorPlugin):
     def guardrails(self) -> GuardrailConfig:
         return GuardrailConfig()
 
+    def deterministic_metric_reliability(self) -> float:
+        return 0.15  # word count and structure score are weak signals
+
+    def build_judge_prompt(
+        self, current_snapshot: str, candidate_diff: str, rubric_text: str, eval_anchors: str,
+    ) -> str | None:
+        return f"""You are an expert document reviewer. Evaluate whether the proposed changes improve this document.
+
+Focus on:
+- Clarity: Is the argument clearer and easier to follow?
+- Completeness: Are important points covered without unnecessary padding?
+- Structure: Are headings, sections, and flow logical?
+- Accuracy: Are claims well-supported and factually correct?
+
+{eval_anchors}
+
+## Current Document
+{current_snapshot}
+
+## Proposed Changes (diff)
+{candidate_diff}
+
+## Evaluation Criteria
+{rubric_text}
+
+Respond ONLY with JSON (no markdown fences):
+{{
+  "scores": [
+    {{"rubric_item": "criterion_name", "score": 0.0, "reasoning": "explanation"}},
+    ...
+  ]
+}}"""
+
+    def judge_perspectives(self) -> list[dict] | None:
+        return [
+            {"role": "domain expert", "instruction": "Evaluate technical accuracy and depth. Is the content correct and thorough?"},
+            {"role": "editor", "instruction": "Evaluate clarity, conciseness, and structure. Is this well-written and easy to follow?"},
+            {"role": "target reader", "instruction": "Evaluate usefulness. Would the intended audience find this helpful and actionable?"},
+        ]
+
+    # ------------------------------------------------------------------
+    # Prompt templates
+    # ------------------------------------------------------------------
+
+    def indexer_prompt_hint(self) -> str:
+        return (
+            "For each document, summarize:\n"
+            "- **Purpose**: What this document covers and its intended audience\n"
+            "- **Structure**: How it's organized (sections, headings, flow)\n"
+            "- **Content quality**: Clarity, completeness, readability\n"
+            "- **Issues**: Outdated info, gaps, redundancy, poor formatting"
+        )
+
+    def analyst_categories(self) -> list[dict[str, str]]:
+        return [
+            {"name": "clarity", "description": "Unclear or confusing explanations"},
+            {"name": "structure", "description": "Poor organization or heading hierarchy"},
+            {"name": "completeness", "description": "Missing information or examples"},
+            {"name": "redundancy", "description": "Repeated or unnecessary content"},
+            {"name": "accuracy", "description": "Outdated or incorrect information"},
+            {"name": "formatting", "description": "Inconsistent or poor formatting"},
+        ]
+
+    def analyst_role(self) -> str:
+        return "a senior technical writer and editor"
+
+    def modifier_role(self) -> str:
+        return "You are an expert technical writer and editor."
+
+    def modifier_constraints(self) -> list[str]:
+        return [
+            "Make exactly ONE focused change to improve the document.",
+            "Preserve the original meaning and technical accuracy.",
+            "Do NOT add filler words or marketing language.",
+            "Do NOT remove technical detail that practitioners need.",
+            "Keep changes minimal — improve one section, not the whole document.",
+        ]
+
+    def reviewer_focus(self) -> str:
+        return (
+            "Evaluate whether this change improves the document. Consider:\n"
+            "1. Is the content clearer and easier to follow?\n"
+            "2. Are important points covered without unnecessary padding?\n"
+            "3. Is the structure logical with proper headings and flow?\n"
+            "4. Are claims well-supported and factually correct?\n"
+            "5. Would the intended audience find this more helpful?"
+        )
+
+    def theme_map(self) -> dict[str, tuple[str, str, str]]:
+        return {
+            "clarity": ("Clarity & Readability", "📖", "Documents are easier to understand and follow."),
+            "structure": ("Structure & Organization", "🏗️", "Logical flow with clear headings and sections."),
+            "completeness": ("Completeness", "📋", "All necessary information and examples are present."),
+            "redundancy": ("Conciseness", "✂️", "Redundant content removed, every sentence earns its place."),
+            "accuracy": ("Accuracy & Currency", "🎯", "Information is correct and up to date."),
+            "formatting": ("Formatting & Consistency", "🎨", "Consistent style, proper formatting throughout."),
+        }
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

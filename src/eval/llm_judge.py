@@ -86,9 +86,17 @@ class LLMJudge:
         candidate_diff: str,
         rubric: list[JudgeRubricItem],
         criteria_version: int,
+        eval_anchors_text: str = "",
+        custom_prompt_builder: object | None = None,
     ) -> JudgeResult:
         """Single pairwise comparison. Judge sees only state + diff + rubric."""
-        prompt = self.build_judge_prompt(current_snapshot, candidate_diff, rubric)
+        if callable(custom_prompt_builder):
+            prompt = custom_prompt_builder(
+                current_snapshot, candidate_diff,
+                self._rubric_to_text(rubric), eval_anchors_text,
+            )
+        else:
+            prompt = self.build_judge_prompt(current_snapshot, candidate_diff, rubric, eval_anchors_text)
         raw = self._call_llm(prompt)
         try:
             scores = self._parse_judge_response(raw, rubric)
@@ -114,30 +122,92 @@ class LLMJudge:
         rubric: list[JudgeRubricItem],
         criteria_version: int,
         num_runs: int | None = None,
+        eval_anchors_text: str = "",
+        perspectives: list[dict] | None = None,
+        custom_prompt_builder: object | None = None,
     ) -> AggregatedJudgeResult:
-        """Run judge N times and aggregate results."""
+        """Run judge N times and aggregate results.
+
+        If perspectives are provided, each run uses a different perspective
+        instead of repeating the same prompt (stronger signal for subjective domains).
+        If custom_prompt_builder is a callable, it's used to build the judge prompt.
+        """
+        if perspectives and len(perspectives) > 0:
+            return self._multi_perspective_judge(
+                current_snapshot, candidate_diff, rubric, criteria_version,
+                eval_anchors_text, perspectives, custom_prompt_builder,
+            )
+
         n = num_runs or self.default_runs
         results: list[JudgeResult] = []
 
         for _ in range(n):
             try:
-                r = self.pairwise_compare(current_snapshot, candidate_diff, rubric, criteria_version)
+                r = self.pairwise_compare(
+                    current_snapshot, candidate_diff, rubric, criteria_version,
+                    eval_anchors_text, custom_prompt_builder,
+                )
                 results.append(r)
             except (JudgeParseError, JudgeLLMError):
-                continue  # skip failed runs
+                continue
 
+        return self._aggregate(results)
+
+    def _multi_perspective_judge(
+        self,
+        current_snapshot: str,
+        candidate_diff: str,
+        rubric: list[JudgeRubricItem],
+        criteria_version: int,
+        eval_anchors_text: str,
+        perspectives: list[dict],
+        custom_prompt_builder: object | None,
+    ) -> AggregatedJudgeResult:
+        """Run judge once per perspective and aggregate across viewpoints."""
+        results: list[JudgeResult] = []
+
+        for perspective in perspectives:
+            role = perspective.get("role", "reviewer")
+            instruction = perspective.get("instruction", "")
+            perspective_prefix = f"You are acting as a {role}. {instruction}\n\n"
+
+            try:
+                # Build prompt with perspective injected
+                if callable(custom_prompt_builder):
+                    base_prompt = custom_prompt_builder(
+                        current_snapshot, candidate_diff,
+                        self._rubric_to_text(rubric), eval_anchors_text,
+                    )
+                else:
+                    base_prompt = self.build_judge_prompt(
+                        current_snapshot, candidate_diff, rubric, eval_anchors_text,
+                    )
+                prompt = perspective_prefix + base_prompt
+                raw = self._call_llm(prompt)
+                scores = self._parse_judge_response(raw, rubric)
+                composite = self._compute_composite(scores, rubric)
+                results.append(JudgeResult(
+                    scores=scores, composite_score=composite,
+                    raw_response=raw, model=self.model,
+                    criteria_version=criteria_version,
+                ))
+            except (JudgeParseError, JudgeLLMError):
+                continue
+
+        return self._aggregate(results)
+
+    @staticmethod
+    def _rubric_to_text(rubric: list[JudgeRubricItem]) -> str:
+        return "\n".join(f"- {r.name}: {r.description} (weight: {r.weight:.2f})" for r in rubric)
+
+    def _aggregate(self, results: list[JudgeResult]) -> AggregatedJudgeResult:
+        """Aggregate multiple judge results into a single verdict."""
         if not results:
-            # All runs failed — return low-confidence empty result
             return AggregatedJudgeResult(
-                individual_results=[],
-                mean_scores={},
-                mean_composite=0.0,
-                variance=1.0,
-                agreement_ratio=0.0,
-                is_stable=False,
+                individual_results=[], mean_scores={}, mean_composite=0.0,
+                variance=1.0, agreement_ratio=0.0, is_stable=False,
             )
 
-        # Aggregate per-rubric scores
         score_lists: dict[str, list[float]] = {}
         for r in results:
             for s in r.scores:
@@ -151,12 +221,9 @@ class LLMJudge:
         agreement = agree_count / len(composites)
 
         return AggregatedJudgeResult(
-            individual_results=results,
-            mean_scores=mean_scores,
-            mean_composite=mean_comp,
-            variance=var,
-            agreement_ratio=agreement,
-            is_stable=var < self.VARIANCE_THRESHOLD,
+            individual_results=results, mean_scores=mean_scores,
+            mean_composite=mean_comp, variance=var,
+            agreement_ratio=agreement, is_stable=var < self.VARIANCE_THRESHOLD,
         )
 
     def build_judge_prompt(
@@ -164,6 +231,7 @@ class LLMJudge:
         current_snapshot: str,
         candidate_diff: str,
         rubric: list[JudgeRubricItem],
+        eval_anchors_text: str = "",
     ) -> str:
         rubric_lines = "\n".join(
             f"- {r.name}: {r.description} (weight: {r.weight:.2f})"
@@ -174,8 +242,10 @@ class LLMJudge:
         if len(current_snapshot) > max_snapshot:
             current_snapshot = current_snapshot[:max_snapshot] + "\n... (truncated)"
 
-        return f"""You are an expert evaluator. Compare the CURRENT state with the PROPOSED CHANGES and score each criterion.
+        anchors_section = f"\n{eval_anchors_text}\n" if eval_anchors_text else ""
 
+        return f"""You are an expert evaluator. Compare the CURRENT state with the PROPOSED CHANGES and score each criterion.
+{anchors_section}
 ## Current State
 {current_snapshot}
 

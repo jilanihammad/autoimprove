@@ -188,12 +188,23 @@ def _parse_diff_stat(stat_output: str) -> tuple[list[str], int, int]:
     return files, added, removed
 
 
-def get_diff(worktree_path: str, from_ref: str, to_ref: str = "HEAD") -> Diff:
-    """Return a ``Diff`` between two refs."""
-    stat = _run_git(["diff", "--numstat", from_ref, to_ref], cwd=worktree_path)
+def get_diff(worktree_path: str, from_ref: str, to_ref: str | None = None) -> Diff:
+    """Return a ``Diff`` between *from_ref* and *to_ref* (or the working tree).
+
+    When *to_ref* is ``None`` (the default), the diff includes uncommitted
+    working-tree changes — i.e. ``git diff <from_ref>``.  This is critical
+    because agents edit files on disk without committing.
+    """
+    diff_args = ["diff", "--numstat", from_ref]
+    if to_ref is not None:
+        diff_args.append(to_ref)
+    stat = _run_git(diff_args, cwd=worktree_path)
     files, added, removed = _parse_diff_stat(stat.stdout)
 
-    raw = _run_git(["diff", from_ref, to_ref], cwd=worktree_path)
+    raw_args = ["diff", from_ref]
+    if to_ref is not None:
+        raw_args.append(to_ref)
+    raw = _run_git(raw_args, cwd=worktree_path)
     return Diff(
         files_changed=files,
         lines_added=added,

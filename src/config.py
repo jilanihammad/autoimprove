@@ -22,9 +22,13 @@ class Config(BaseModel):
     max_iterations: int | None = None
 
     # Stop conditions
-    max_consecutive_rejections: int = Field(default=5, ge=1)
+    max_consecutive_rejections: int = Field(default=15, ge=1)
     max_file_churn: int = Field(default=3, ge=2)
     min_confidence_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    max_backlog_regenerations: int = Field(default=3, ge=0)
+
+    # Scope enforcement
+    enforce_file_scope: bool = True
 
     # Evaluation
     eval_refinement_interval: int = Field(default=5, ge=1)
@@ -49,6 +53,9 @@ class Config(BaseModel):
     confidence_thresholds: dict[str, float] = Field(
         default_factory=lambda: {"code": 0.6, "workflow": 0.4, "document": 0.3}
     )
+
+    # Plugin extensibility
+    extra_plugin_dirs: list[str] = Field(default_factory=list)
 
     @field_validator("target_paths")
     @classmethod

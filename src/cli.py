@@ -24,7 +24,12 @@ def main() -> None:
 @click.option("-t", "--time", "time_budget", type=int, default=None, help="Time budget in minutes.")
 @click.option("-a", "--agent", "agent_cmd", type=str, default=None, help="Agent command to use.")
 @click.option("--auto", "auto_mode", is_flag=True, default=False, help="Skip interactive grounding.")
-def run(config_path: str, time_budget: int | None, agent_cmd: str | None, auto_mode: bool) -> None:
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Run pipeline without committing changes.")
+@click.option("--preview", "preview_mode", is_flag=True, default=False, help="Collect proposals for user review before applying.")
+def run(
+    config_path: str, time_budget: int | None, agent_cmd: str | None,
+    auto_mode: bool, dry_run: bool, preview_mode: bool,
+) -> None:
     """Start an autonomous improvement run."""
     cfg_path = Path(config_path)
     if not cfg_path.exists():
@@ -45,7 +50,7 @@ def run(config_path: str, time_budget: int | None, agent_cmd: str | None, auto_m
         click.echo(f"Warning: {w}", err=True)
 
     from src.orchestrator import run_autoimprove
-    run_autoimprove(config)
+    run_autoimprove(config, dry_run=dry_run, preview=preview_mode)
 
 
 @main.command()

@@ -102,8 +102,8 @@ class BaseAgent:
         if "kiro" in cmd_base:
             with open(prompt_file) as f:
                 prompt_text = f.read()
-            # Coder needs tools; analysis roles get a "no tools" instruction
-            if self.role != "coder":
+            # Roles that modify files need tools; analysis roles get a "no tools" instruction
+            if self.role not in ("coder", "modifier"):
                 prompt_text = (
                     "IMPORTANT: Do NOT use any tools (no code, read, grep, fs_read, execute_bash, etc). "
                     "All the information you need is provided below. "

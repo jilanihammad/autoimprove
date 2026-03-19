@@ -27,6 +27,7 @@ class IndexerAgent(BaseAgent):
 
     def run(
         self, target_files: list[str], working_dir: str, cache_path: Path | None = None,
+        indexer_hint: str = "",
     ) -> dict[str, str]:
         """Index all target files. Returns ``{filepath: summary}``."""
         from rich.live import Live
@@ -84,7 +85,7 @@ class IndexerAgent(BaseAgent):
                 for batch_num, batch in enumerate(batches):
                     status[batch_num] = ("🔄", "queued")
                     futures[pool.submit(
-                        self._index_batch_tracked, batch_num, batch, wd, working_dir, status
+                        self._index_batch_tracked, batch_num, batch, wd, working_dir, status, indexer_hint
                     )] = batch_num
                     live.update(build_table())
 
@@ -158,6 +159,7 @@ class IndexerAgent(BaseAgent):
 
     def _index_batch_tracked(
         self, batch_num: int, batch: list[str], wd: Path, working_dir: str, status: dict,
+        indexer_hint: str = "",
     ) -> dict[str, str]:
         """Index a single batch, updating status for live display."""
         status[batch_num] = ("🔄", "reading files...")
@@ -166,7 +168,7 @@ class IndexerAgent(BaseAgent):
             return {}
 
         status[batch_num] = ("🔄", "agent working...")
-        prompt = self._build_prompt(file_contents)
+        prompt = self._build_prompt(file_contents, indexer_hint)
         result = self.invoke(prompt, working_dir)
 
         if result.success:
@@ -200,14 +202,34 @@ class IndexerAgent(BaseAgent):
 
         return {}
 
+    # Binary file extensions that should be skipped by the indexer
+    _BINARY_EXTENSIONS = frozenset({
+        ".xlsx", ".xls", ".pptx", ".ppt", ".docx", ".doc",
+        ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+        ".woff", ".woff2", ".ttf", ".eot",
+        ".zip", ".tar", ".gz", ".bz2",
+        ".exe", ".dll", ".so", ".dylib", ".pyc", ".pyo", ".class",
+        ".mp3", ".mp4", ".wav", ".avi", ".mov",
+        ".sqlite", ".db",
+    })
+
     def _read_batch(self, files: list[str], wd: Path) -> dict[str, str]:
         """Read files for a batch. Each file gets a fair share of the char budget."""
         n = len(files)
         per_file_budget = self.MAX_BATCH_CHARS // max(n, 1)
         contents: dict[str, str] = {}
         for f in files:
+            fp = wd / f
+            # Skip binary files
+            if fp.suffix.lower() in self._BINARY_EXTENSIONS:
+                contents[f] = f"(binary file: {fp.suffix})"
+                continue
             try:
-                text = (wd / f).read_text(errors="ignore")
+                text = fp.read_text(errors="ignore")
+                # Detect binary content (null bytes)
+                if "\x00" in text[:1024]:
+                    contents[f] = f"(binary file: {fp.suffix})"
+                    continue
                 if len(text) > per_file_budget:
                     # Keep beginning + end (most useful context)
                     half = per_file_budget // 2
@@ -221,25 +243,28 @@ class IndexerAgent(BaseAgent):
     # Prompts and parsing
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, file_contents: dict[str, str]) -> str:
+    def _build_prompt(self, file_contents: dict[str, str], indexer_hint: str = "") -> str:
         files_section = "\n".join(
             f"--- {fp} ---\n{content}\n"
             for fp, content in file_contents.items()
         )
-        return f"""You are a senior engineer producing a codebase index. For each file below, provide a concise summary.
+        hint = indexer_hint or (
+            "For each file, output:\n"
+            "- **Purpose**: What this file/module does (1 sentence)\n"
+            "- **Key abstractions**: Main classes, functions, or patterns\n"
+            "- **Dependencies**: What it imports from / is used by\n"
+            "- **Complexity hotspots**: Anything notably complex or fragile"
+        )
+        return f"""You are a senior engineer producing an artifact index. For each file below, provide a concise summary.
 
-For each file, output:
-- **Purpose**: What this file/module does (1 sentence)
-- **Key abstractions**: Main classes, functions, or patterns
-- **Dependencies**: What it imports from / is used by
-- **Complexity hotspots**: Anything notably complex or fragile
+{hint}
 
 {files_section}
 
 Respond ONLY with JSON (no markdown fences):
 {{
   "summaries": {{
-    "path/to/file.js": "Purpose: ... Key abstractions: ... Dependencies: ... Complexity: ...",
+    "path/to/file.ext": "concise summary following the guidance above",
     ...
   }}
 }}"""
@@ -247,7 +272,14 @@ Respond ONLY with JSON (no markdown fences):
     def _parse_summaries(self, output: str) -> dict[str, str]:
         parsed = self.parse_json(output)
         if isinstance(parsed, dict):
-            return parsed.get("summaries", parsed)
+            raw = parsed.get("summaries", parsed)
+            if not isinstance(raw, dict):
+                return {}
+            # Ensure all values are strings (LLM may return nested dicts)
+            return {
+                k: (str(v) if not isinstance(v, str) else v)
+                for k, v in raw.items()
+            }
         return {}
 
     def _fallback_parse(self, output: str, file_paths: list[str]) -> dict[str, str]:
@@ -290,6 +322,8 @@ Respond ONLY with JSON (no markdown fences):
             for fp in sorted(by_dir[dir_name]):
                 loc = self._count_lines(wd / fp)
                 summary = summaries.get(fp, "No summary available.")
+                if not isinstance(summary, str):
+                    summary = str(summary)
                 lines.append(f"### `{Path(fp).name}` ({loc} lines)")
                 lines.append(summary)
                 lines.append("")

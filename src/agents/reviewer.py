@@ -33,9 +33,13 @@ class ReviewerAgent(BaseAgent):
         item: BacklogItem,
         eval_anchors_judge: str,
         file_summaries: dict[str, str],
+        reviewer_focus: str = "",
+        semantic_diff_text: str = "",
     ) -> ReviewResult:
         """Review a diff and return accept/reject with reasoning."""
-        prompt = self._build_prompt(diff_text, item, eval_anchors_judge, file_summaries)
+        # Prefer semantic diff text for non-text artifacts (binary files)
+        effective_diff = semantic_diff_text or diff_text
+        prompt = self._build_prompt(effective_diff, item, eval_anchors_judge, file_summaries, reviewer_focus)
         result = self.invoke(prompt, "/tmp")
 
         if not result.success:
@@ -49,6 +53,7 @@ class ReviewerAgent(BaseAgent):
         item: BacklogItem,
         eval_anchors: str,
         file_summaries: dict[str, str],
+        reviewer_focus: str = "",
     ) -> str:
         summaries = "\n".join(
             f"- `{fp}`: {summary}" for fp, summary in file_summaries.items()
@@ -58,7 +63,16 @@ class ReviewerAgent(BaseAgent):
         if len(diff_text) > 6000:
             diff_text = diff_text[:6000] + "\n... (truncated)"
 
-        return f"""You are a senior code reviewer. Evaluate whether this diff is a genuine improvement.
+        focus = reviewer_focus or (
+            "Evaluate whether this diff is a genuine improvement. Consider:\n"
+            "1. Does it achieve the stated task?\n"
+            "2. Does it violate any must-preserve constraints?\n"
+            "3. Is it actually better by the project owner's definition?\n"
+            "4. Are there any regressions, even subtle ones?\n"
+            "5. Is the change focused and minimal, or does it include unnecessary modifications?"
+        )
+
+        return f"""You are a senior reviewer. {focus}
 
 ## Task That Was Attempted
 **{item.title}**: {item.description}
@@ -72,12 +86,7 @@ class ReviewerAgent(BaseAgent):
 {diff_text}
 
 ## Your Review
-Evaluate this diff against the eval anchors above. Consider:
-1. Does it achieve the stated task?
-2. Does it violate any must-preserve constraints?
-3. Is it actually better by the project owner's definition?
-4. Are there any regressions, even subtle ones?
-5. Is the change focused and minimal, or does it include unnecessary modifications?
+Evaluate this diff against the eval anchors above.
 
 Respond ONLY with JSON (no markdown fences):
 {{

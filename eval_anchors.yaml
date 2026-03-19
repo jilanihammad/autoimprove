@@ -1,0 +1,61 @@
+global:
+  must_preserve:
+    - description: "EvaluatorPlugin abstract base class interface must not change"
+      files: ["src/plugins/base.py"]
+    - description: "CLI command signatures (run, merge, discard, status, calibrate) must not change"
+      files: ["src/cli.py"]
+    - description: "config.yaml schema must remain backward compatible"
+      files: ["src/config.py"]
+    - description: "All existing tests must pass"
+      test: "python -m pytest tests/"
+    - description: "Git operations interface must not change"
+      files: ["src/git_ops.py"]
+
+code:
+  better_means:
+    - "Fewer lines of code for the same functionality"
+    - "Clearer error messages that tell the user what went wrong and how to fix it"
+    - "More robust JSON parsing with better fallback strategies"
+    - "Functions under 50 lines with clear single responsibility"
+    - "Replacing raw dicts with typed dataclasses or Pydantic models"
+    - "Reducing duplicated logic across plugins into shared helpers"
+  worse_means:
+    - "Adding abstraction layers that don't reduce duplication"
+    - "Changing variable names without structural improvement"
+    - "Moving code between files without reducing coupling"
+    - "Adding comments that restate what the code already says"
+    - "Making changes that increase the number of agent CLI invocations per iteration"
+
+document:
+  better_means:
+    - "Clearer structure with logical heading hierarchy"
+    - "Removing redundant or outdated content"
+    - "Adding concrete examples where abstract explanations exist"
+    - "Shorter sentences that convey the same meaning"
+  worse_means:
+    - "Adding filler words or marketing language"
+    - "Splitting focused sections into multiple vague ones"
+    - "Removing technical detail that practitioners need"
+
+workflow:
+  better_means:
+    - "Adding error handling to nodes that can fail"
+    - "Simplifying flow by removing redundant branches"
+    - "Adding retry logic for external API calls"
+  worse_means:
+    - "Adding nodes that don't contribute to the output"
+    - "Removing error handling for brevity"
+
+agent:
+  better_means:
+    - "Clearer, more specific instructions in system prompts"
+    - "Fewer tokens for the same capability (conciseness)"
+    - "Better tool descriptions with examples and error handling"
+    - "Stronger guardrails with explicit refusal patterns"
+    - "Consistent persona without contradictory instructions"
+  worse_means:
+    - "Removing safety guardrails or refusal instructions"
+    - "Adding vague or contradictory instructions"
+    - "Making the prompt significantly longer without added capability"
+    - "Changing the agent's core persona or role"
+    - "Breaking tool definition syntax (invalid JSON/YAML)"

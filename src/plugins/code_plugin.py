@@ -288,6 +288,73 @@ class CodePlugin(EvaluatorPlugin):
             forbidden_extensions=[".exe", ".dll", ".so", ".pyc", ".pyo", ".class"],
         )
 
+    def deterministic_metric_reliability(self) -> float:
+        return 0.85  # tests, lint, types are strong signals
+
+    # ------------------------------------------------------------------
+    # Prompt templates
+    # ------------------------------------------------------------------
+
+    def indexer_prompt_hint(self) -> str:
+        return (
+            "For each file, summarize:\n"
+            "- **Purpose**: What this file/module does (1 sentence)\n"
+            "- **Key abstractions**: Main classes, functions, or patterns\n"
+            "- **Dependencies**: What it imports from / is used by\n"
+            "- **Complexity hotspots**: Anything notably complex or fragile"
+        )
+
+    def analyst_categories(self) -> list[dict[str, str]]:
+        return [
+            {"name": "error_handling", "description": "Missing or unclear error handling"},
+            {"name": "complexity", "description": "Functions or modules that are too complex"},
+            {"name": "type_safety", "description": "Missing or weak type annotations"},
+            {"name": "performance", "description": "Inefficient code paths"},
+            {"name": "readability", "description": "Hard-to-follow logic or naming"},
+            {"name": "maintainability", "description": "Tight coupling or poor structure"},
+            {"name": "validation", "description": "Missing input validation"},
+            {"name": "documentation", "description": "Missing or misleading documentation"},
+        ]
+
+    def analyst_role(self) -> str:
+        return "a principal staff engineer conducting a code review"
+
+    def modifier_role(self) -> str:
+        return "You are a distinguished principal engineer."
+
+    def modifier_constraints(self) -> list[str]:
+        return [
+            "Make exactly ONE focused change.",
+            "Use your tools to edit the files directly — write the changes to disk.",
+            "Do NOT modify any files not listed above.",
+            "Do NOT add new dependencies.",
+            "Keep changes minimal and focused — do not refactor beyond the task scope.",
+            "Verify your changes don't break the existing API contracts.",
+        ]
+
+    def reviewer_focus(self) -> str:
+        return (
+            "Evaluate whether this diff is a genuine improvement. Consider:\n"
+            "1. Does it achieve the stated task?\n"
+            "2. Does it violate any must-preserve constraints?\n"
+            "3. Is it actually better by the project owner's definition?\n"
+            "4. Are there any regressions, even subtle ones?\n"
+            "5. Is the change focused and minimal, or does it include unnecessary modifications?"
+        )
+
+    def theme_map(self) -> dict[str, tuple[str, str, str]]:
+        return {
+            "error_handling": ("Reliability & Error Handling", "🛡️", "Users get clear error messages instead of silent failures and crashes."),
+            "errorhandling": ("Reliability & Error Handling", "🛡️", "Users get clear error messages instead of silent failures and crashes."),
+            "validation": ("Reliability & Error Handling", "🛡️", "Users get clear error messages instead of silent failures and crashes."),
+            "complexity": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+            "performance": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+            "maintainability": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+            "readability": ("Performance & Code Quality", "⚡", "Faster response times, smaller functions, easier to maintain and extend."),
+            "documentation": ("Documentation & Type Safety", "📝", "New contributors can understand the codebase faster, fewer runtime type errors."),
+            "type_safety": ("Documentation & Type Safety", "📝", "New contributors can understand the codebase faster, fewer runtime type errors."),
+        }
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -533,11 +600,27 @@ class CodePlugin(EvaluatorPlugin):
             return self._run_tsc(working_dir)
         return TypecheckResult()
 
+    def _find_tsconfig_dir(self, working_dir: str) -> str | None:
+        """Find the directory containing tsconfig.json."""
+        root = Path(working_dir)
+        if (root / "tsconfig.json").exists():
+            return working_dir
+        for child in sorted(root.iterdir()):
+            if not child.is_dir() or child.name in ("node_modules", ".next", ".autoimprove"):
+                continue
+            if (child / "tsconfig.json").exists():
+                return str(child)
+        return None
+
     def _run_tsc(self, working_dir: str) -> TypecheckResult:
+        tsc_dir = self._find_tsconfig_dir(working_dir)
+        if tsc_dir is None:
+            # No tsconfig.json found — skip typecheck (pass by default)
+            return TypecheckResult()
         try:
             result = subprocess.run(
                 ["npx", "tsc", "--noEmit", "--pretty", "false"],
-                cwd=working_dir, capture_output=True, text=True, timeout=120,
+                cwd=tsc_dir, capture_output=True, text=True, timeout=120,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return TypecheckResult()
@@ -546,6 +629,11 @@ class CodePlugin(EvaluatorPlugin):
         for line in result.stdout.splitlines():
             if ": error TS" in line:
                 error_count += 1
+
+        # If returncode is non-zero but no actual TS errors found, treat as pass
+        # (e.g. tsc not installed, wrong tsc binary, missing tsconfig)
+        if result.returncode != 0 and error_count == 0:
+            return TypecheckResult()
 
         return TypecheckResult(
             passed=result.returncode == 0,

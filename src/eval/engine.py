@@ -14,7 +14,7 @@ from src.config import Config
 from src.eval.llm_judge import AggregatedJudgeResult, JudgeRubricItem, LLMJudge
 from src.plugins.base import EvaluatorPlugin
 from src.policy import PolicyResult, check_policy
-from src.types import ConfidenceProfile, Decision, Diff, GateResult, SoftEvalResult
+from src.types import ConfidenceProfile, Decision, Diff, GateResult, SemanticDiff, SoftEvalResult
 
 # Reason codes
 REASON_POLICY_VIOLATION = "policy_violation"
@@ -70,6 +70,9 @@ class AcceptanceEngine:
         criteria: dict,
         criteria_version: int,
         working_dir: str = "",
+        eval_anchors_text: str = "",
+        semantic_diff: SemanticDiff | None = None,
+        calibration_threshold_delta: float = 0.0,
     ) -> AcceptanceDecision:
         """Run the full decision pipeline."""
         start = time.monotonic()
@@ -114,16 +117,26 @@ class AcceptanceEngine:
         if rubric:
             num_runs = self._judge_runs_for_profile()
             snapshot = self._get_current_snapshot(targets, working_dir)
+            perspectives = self.plugin.judge_perspectives()
+            custom_builder = self.plugin.build_judge_prompt
+            # Only pass custom builder if the plugin overrides it (base returns None)
+            test_prompt = self.plugin.build_judge_prompt("", "", "", "")
+            # Use semantic diff text for non-text artifacts when available
+            candidate_diff_text = (
+                semantic_diff.as_text() if semantic_diff else diff.raw_diff[:6000]
+            )
             try:
                 judge_result = self.llm_judge.repeated_judge(
                     current_snapshot=snapshot,
-                    candidate_diff=diff.raw_diff[:6000],
+                    candidate_diff=candidate_diff_text,
                     rubric=rubric,
                     criteria_version=criteria_version,
                     num_runs=num_runs,
+                    eval_anchors_text=eval_anchors_text,
+                    perspectives=perspectives,
+                    custom_prompt_builder=custom_builder if test_prompt is not None else None,
                 )
             except Exception:
-                # Judge failed — continue with deterministic only, confidence penalty applied later
                 judge_result = None
         evidence.judge_result = judge_result
 
@@ -145,6 +158,8 @@ class AcceptanceEngine:
         threshold = self.config.confidence_thresholds.get(
             self.plugin.name, 0.5
         )
+        # Apply calibration adjustment from user feedback history
+        threshold = max(0.0, min(1.0, threshold + calibration_threshold_delta))
         if confidence < threshold:
             return _reject(REASON_LOW_CONFIDENCE, {
                 "confidence": confidence,
@@ -217,13 +232,9 @@ class AcceptanceEngine:
         judge_score = judge_result.mean_composite if judge_result else None
 
         if det_score is not None and judge_score is not None:
-            # Weight split depends on confidence profile
-            if self.plugin.confidence_profile == ConfidenceProfile.HIGH:
-                det_w, judge_w = 0.6, 0.4
-            elif self.plugin.confidence_profile == ConfidenceProfile.LOW:
-                det_w, judge_w = 0.2, 0.8
-            else:
-                det_w, judge_w = 0.4, 0.6
+            # Adaptive weighting based on plugin's deterministic signal strength
+            det_w = self.plugin.deterministic_metric_reliability()
+            judge_w = 1.0 - det_w
             return det_score * det_w + judge_score * judge_w
 
         if judge_score is not None:

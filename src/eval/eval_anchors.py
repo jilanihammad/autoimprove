@@ -22,6 +22,8 @@ class EvalAnchors:
     must_preserve: list[dict] = field(default_factory=list)
     # Calibration entries added from user feedback on past runs
     calibrations: list[dict] = field(default_factory=list)
+    # Which plugin these anchors were loaded for (empty = global/unscoped)
+    plugin_name: str = ""
 
     def for_judge_prompt(self) -> str:
         """Format anchors for the LLM judge prompt."""
@@ -83,8 +85,30 @@ class EvalAnchors:
         return "\n".join(lines)
 
 
-def load_eval_anchors(project_root: str) -> EvalAnchors:
-    """Load eval_anchors.yaml from the project root. Returns empty anchors if not found."""
+def _is_flat_format(raw: dict) -> bool:
+    """Detect legacy flat format (top-level better_means/worse_means/must_preserve)."""
+    return any(k in raw for k in ("better_means", "worse_means", "must_preserve"))
+
+
+def _merge_anchor_sections(global_sec: dict, plugin_sec: dict) -> dict:
+    """Merge a plugin-specific section on top of the global section."""
+    return {
+        "better_means": global_sec.get("better_means", []) + plugin_sec.get("better_means", []),
+        "worse_means": global_sec.get("worse_means", []) + plugin_sec.get("worse_means", []),
+        "must_preserve": global_sec.get("must_preserve", []) + plugin_sec.get("must_preserve", []),
+    }
+
+
+def load_eval_anchors(project_root: str, plugin_name: str | None = None) -> EvalAnchors:
+    """Load eval_anchors.yaml from the project root.
+
+    Supports two formats:
+    - **Flat** (legacy): top-level ``better_means``, ``worse_means``, ``must_preserve``.
+    - **Sectioned**: top-level keys are ``global``, ``code``, ``document``, etc.
+      The ``global`` section is always loaded; the plugin-specific section is merged on top.
+
+    Returns empty anchors if file not found.
+    """
     path = Path(project_root) / "eval_anchors.yaml"
     if not path.exists():
         return EvalAnchors()
@@ -95,8 +119,28 @@ def load_eval_anchors(project_root: str) -> EvalAnchors:
     except (yaml.YAMLError, OSError):
         return EvalAnchors()
 
+    if not isinstance(raw, dict):
+        return EvalAnchors()
+
+    # Legacy flat format — ignore plugin_name
+    if _is_flat_format(raw):
+        return EvalAnchors(
+            better_means=raw.get("better_means", []),
+            worse_means=raw.get("worse_means", []),
+            must_preserve=raw.get("must_preserve", []),
+        )
+
+    # Sectioned format
+    global_sec = raw.get("global", {}) if isinstance(raw.get("global"), dict) else {}
+    plugin_sec = {}
+    if plugin_name and plugin_name in raw and isinstance(raw[plugin_name], dict):
+        plugin_sec = raw[plugin_name]
+
+    merged = _merge_anchor_sections(global_sec, plugin_sec)
+
     return EvalAnchors(
-        better_means=raw.get("better_means", []),
-        worse_means=raw.get("worse_means", []),
-        must_preserve=raw.get("must_preserve", []),
+        better_means=merged["better_means"],
+        worse_means=merged["worse_means"],
+        must_preserve=merged["must_preserve"],
+        plugin_name=plugin_name or "",
     )

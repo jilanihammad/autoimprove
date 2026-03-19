@@ -1,5 +1,5 @@
 # Agent
-agent_command: "claude"           # "claude", "codex", "kiro-cli chat", or custom
+agent_command: "kiro-cli"           # "claude", "codex", "kiro-cli chat", or custom
 agent_timeout_seconds: 300        # Max time per agent invocation
 
 # Budgets
@@ -8,13 +8,17 @@ time_budget_minutes: 120          # Total wall-clock time for the run
 # max_iterations: null             # Optional: hard cap on iteration count
 
 # Stop conditions
-max_consecutive_rejections: 5     # Stop after N rejections in a row
+max_consecutive_rejections: 15    # Stop after N rejections in a row
 max_file_churn: 3                 # Stop if same file modified N times with no net gain
 min_confidence_threshold: 0.3     # Stop if avg confidence drops below this
+max_backlog_regenerations: 3      # Re-run analyst when backlog runs dry (0 = disable)
+
+# Scope enforcement
+enforce_file_scope: true          # Reject diffs that touch files outside the backlog item's scope
 
 # Evaluation
 eval_refinement_interval: 5       # Iterations between criteria review proposals
-llm_judge_model: "claude-opus-4-6"  # Model used for LLM-as-judge evaluation
+llm_judge_model: "claude-opus-4.6"  # Model used for LLM-as-judge evaluation
 llm_judge_runs: 3                 # Repeated judging runs for low-confidence artifacts
 grounding_mode: interactive       # interactive = human approves criteria; auto = use defaults
 

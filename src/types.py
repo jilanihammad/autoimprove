@@ -32,6 +32,15 @@ class RunStatus(str, Enum):
     FAILED = "failed"
 
 
+class IterationStrategy(str, Enum):
+    """How the orchestrator handles accept/reject for an artifact type."""
+
+    AUTO = "auto"            # High confidence — auto-accept above threshold
+    INTERACTIVE = "interactive"  # Medium — show diff + score, ask user per change
+    BATCH = "batch"          # Low — collect N proposals, let user pick best
+    PREVIEW = "preview"      # Very low — generate before/after, require approval
+
+
 # ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
@@ -45,6 +54,36 @@ class Diff:
     lines_added: int
     lines_removed: int
     raw_diff: str
+
+
+@dataclass
+class SemanticDiff:
+    """Human/LLM-readable description of changes to a non-text artifact.
+
+    Used instead of raw git diffs for binary files (PPTX, DOCX, XLSX)
+    where ``git diff`` produces opaque output.
+    """
+
+    summary: str  # e.g. "3 slides modified, 1 deleted"
+    sections: list[dict[str, str]] = field(default_factory=list)
+    # Each dict: {"location": "Slide 3", "change": "Removed 47 words..."}
+    metrics: dict[str, tuple] = field(default_factory=dict)
+    # e.g. {"word_count": (340, 293), "slide_count": (12, 11)}
+
+    def as_text(self) -> str:
+        """Format as readable text for inclusion in prompts."""
+        lines = [f"## Change Summary\n{self.summary}\n"]
+        if self.sections:
+            lines.append("## Detailed Changes")
+            for s in self.sections:
+                loc = s.get("location", "Unknown")
+                change = s.get("change", "")
+                lines.append(f"- **{loc}**: {change}")
+        if self.metrics:
+            lines.append("\n## Metrics")
+            for name, (before, after) in self.metrics.items():
+                lines.append(f"- {name}: {before} → {after}")
+        return "\n".join(lines)
 
 
 @dataclass

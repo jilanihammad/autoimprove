@@ -76,6 +76,30 @@ def _warn(result: PolicyResult, rule: str, msg: str, *, file: str | None = None)
     result.warning_count += 1
 
 
+def check_file_scope(diff: Diff, allowed_files: list[str]) -> PolicyResult:
+    """Reject if diff touches files outside the allowed scope.
+
+    Matching rules:
+    - Exact path match: 'src/foo.py' allows only 'src/foo.py'
+    - Directory prefix: 'src/agents/' allows any file under src/agents/
+    """
+    result = PolicyResult()
+    if not allowed_files:
+        return result
+
+    exact = {a for a in allowed_files if not a.endswith("/")}
+    prefixes = [a for a in allowed_files if a.endswith("/")]
+
+    for f in diff.files_changed:
+        if f in exact:
+            continue
+        if any(f.startswith(p) for p in prefixes):
+            continue
+        _fail(result, "file_scope", f"File outside task scope: {f} (allowed: {allowed_files[:3]})", file=f)
+
+    return result
+
+
 def check_policy(
     diff: Diff,
     config: Config,

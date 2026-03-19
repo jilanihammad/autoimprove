@@ -29,6 +29,7 @@ from src.plugins.registry import PluginRegistry
 from src.preflight import run_preflight
 from src.project_memory import ProjectMemory, build_run_summary
 from src.repo_index import get_or_generate_index
+from src.reporting.experiment_log import TSVLogger
 from src.run_context import RunContext
 from src.types import Decision, RunStatus
 
@@ -52,7 +53,7 @@ def _signal_handler(signum: int, frame: object) -> None:
 # ======================================================================
 
 
-def run_autoimprove(config: Config) -> None:
+def run_autoimprove(config: Config, dry_run: bool = False, preview: bool = False) -> None:
     """Top-level entry point for an AutoImprove run."""
     repo_path = str(Path.cwd().resolve())
 
@@ -77,17 +78,24 @@ def run_autoimprove(config: Config) -> None:
 
     # 3. Discover plugins
     registry = PluginRegistry()
-    registry.discover_and_register_defaults()
+    registry.discover_all(extra_plugin_dirs=config.extra_plugin_dirs)
     detected = registry.detect_plugins_for_paths(config.target_paths, config.exclude_paths)
     if not detected:
         click.echo("No evaluable artifacts found in target paths.", err=True)
         run_ctx.cleanup()
         raise SystemExit(1)
 
+    # Support multi-artifact: detect all plugins, pick primary for single-plugin flow
+    all_detected = detected
     plugin_name = list(detected.keys())[0]
     plugin = registry.get(plugin_name)
     targets = detected[plugin_name]
-    click.echo(f"Plugin: {plugin.name} ({len(targets)} targets)")
+    if len(detected) > 1:
+        click.echo("Detected artifact types:")
+        for pname, ptargets in detected.items():
+            click.echo(f"  {pname}: {len(ptargets)} targets")
+    else:
+        click.echo(f"Plugin: {plugin.name} ({len(targets)} targets)")
 
     # 3b. Generate repo index
     click.echo("Generating codebase index...", nl=False)
@@ -116,6 +124,11 @@ def run_autoimprove(config: Config) -> None:
     if anchors.calibrations:
         click.echo(f"Calibrations: {len(anchors.calibrations)} from past feedback")
 
+    # 4c. Distill calibration lessons for eval pipeline
+    calibration_lessons = project_mem.get_calibration_lessons(plugin.name)
+    if calibration_lessons.get("threshold_delta", 0.0) != 0.0:
+        click.echo(f"Calibration threshold adjustment: {calibration_lessons['threshold_delta']:+.2f}")
+
     try:
         if config.orchestration_mode == "multi":
             # Multi-agent pipeline
@@ -126,22 +139,48 @@ def run_autoimprove(config: Config) -> None:
 
             summaries, backlog = run_multi_agent_grounding(
                 run_ctx, config, targets, program_md, anchors, project_mem,
+                plugin=plugin, calibration_lessons=calibration_lessons,
+                all_plugins=all_detected if len(all_detected) > 1 else None,
+                registry=registry if len(all_detected) > 1 else None,
             )
 
             if not backlog.has_pending():
                 click.echo("Analyst produced no actionable items.", err=True)
                 run_ctx.stop_reason = "Empty backlog"
+            elif dry_run:
+                # Dry-run: show backlog + what would happen, don't iterate
+                click.echo("\n── DRY RUN RESULTS ──")
+                click.echo(f"Backlog: {backlog.summary()}")
+                click.echo(f"Plugin: {plugin.name} ({plugin.description})")
+                click.echo(f"Strategy: {plugin.iteration_strategy().value}")
+                click.echo("\nTop 5 proposed improvements:")
+                for i, item in enumerate(backlog.items[:5]):
+                    click.echo(f"  {i+1}. [{item.priority:.1f}] {item.title}")
+                    click.echo(f"     Files: {', '.join(item.files[:3])}")
+                click.echo("\nNo changes committed. Run without --dry-run to apply.")
+                run_ctx.stop_reason = "dry_run"
             else:
                 signal.signal(signal.SIGINT, _signal_handler)
                 run_multi_agent_loop(
                     run_ctx, plugin, config, targets, backlog,
                     summaries, anchors, search_mem,
+                    program_md=program_md, project_mem=project_mem,
+                    calibration_lessons=calibration_lessons,
+                    preview=preview,
+                    registry=registry if len(all_detected) > 1 else None,
                 )
         else:
             # Single-agent mode (original)
             criteria = run_grounding_phase(run_ctx, plugin, agent, criteria_mgr, targets, config)
-            signal.signal(signal.SIGINT, _signal_handler)
-            run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem, anchors, repo_index)
+            if dry_run:
+                click.echo("\n── DRY RUN RESULTS ──")
+                click.echo(f"Plugin: {plugin.name}")
+                click.echo(f"Criteria: {len(criteria_mgr.get_current().items)} items")
+                click.echo("No changes committed. Run without --dry-run to apply.")
+                run_ctx.stop_reason = "dry_run"
+            else:
+                signal.signal(signal.SIGINT, _signal_handler)
+                run_autonomous_loop(run_ctx, plugin, agent, engine, criteria_mgr, search_mem, config, targets, project_mem, anchors, repo_index, calibration_lessons)
 
     except KeyboardInterrupt:
         run_ctx.stop_reason = "User interrupt"
@@ -175,9 +214,10 @@ def run_autoimprove(config: Config) -> None:
     click.echo(f"Iterations: {run_ctx.current_iteration}")
     click.echo(f"Accepted: {run_ctx.total_accepts}  Rejected: {run_ctx.total_rejects}")
     click.echo(f"Duration: {run_ctx.elapsed_minutes():.1f} minutes")
-    click.echo()
-    click.echo(f"To apply changes:  uv run autoimprove merge {run_ctx.run_id}")
-    click.echo(f"To discard:        uv run autoimprove discard {run_ctx.run_id}")
+
+    if run_ctx.total_accepts > 0:
+        click.echo()
+        _print_review_instructions(run_ctx)
 
 
 # ======================================================================
@@ -332,13 +372,20 @@ def run_autonomous_loop(
     project_mem: ProjectMemory,
     anchors: EvalAnchors,
     repo_index: str,
+    calibration_lessons: dict | None = None,
 ) -> None:
     """The heart of AutoImprove: iterate until a stop condition is met."""
     program_path = Path(run_ctx.repo_path) / "program.md"
     program_md = program_path.read_text() if program_path.exists() else ""
     project_memory_context = project_mem.get_prompt_context()
+    # Enrich judge anchors with calibration context
+    cal_judge_ctx = (calibration_lessons or {}).get("judge_context", "")
     anchors_for_judge = anchors.for_judge_prompt()
+    if cal_judge_ctx:
+        anchors_for_judge = anchors_for_judge + "\n\n" + cal_judge_ctx
     anchors_for_agent = anchors.for_agent_prompt()
+    calibration_threshold_delta = (calibration_lessons or {}).get("threshold_delta", 0.0)
+    tsv = TSVLogger(run_ctx.run_dir / "experiment_log.tsv")
 
     while True:
         # Check stop conditions
@@ -441,6 +488,7 @@ def run_autonomous_loop(
             criteria_version=criteria_mgr.get_current().version,
             working_dir=str(run_ctx.worktree_path),
             eval_anchors_text=anchors_for_judge,
+            calibration_threshold_delta=calibration_threshold_delta,
         )
         eval_time = time.monotonic() - t0
         click.echo(f" {eval_time:.0f}s")
@@ -459,11 +507,13 @@ def run_autonomous_loop(
                 run_ctx.current_composite_score = decision.composite_score
             click.echo(f"│ ✅ ACCEPTED (score: {score_str}, confidence: {conf_str})")
             click.echo(f"│    Files: {', '.join(diff.files_changed[:5])}")
+            tsv.log(iteration, "accept", decision.composite_score, decision.confidence, diff.files_changed, hypothesis)
         else:
             run_ctx.record_reject()
             detail_str = json.dumps(decision.detail)[:150]
             click.echo(f"│ ❌ REJECTED: {decision.reason}")
             click.echo(f"│    Detail: {detail_str}")
+            tsv.log(iteration, f"reject_{decision.reason}", decision.composite_score, decision.confidence, diff.files_changed, hypothesis)
 
         click.echo(f"└─ Accepts: {run_ctx.total_accepts}, Rejects: {run_ctx.total_rejects} | Score: {score_str}, Conf: {conf_str}")
 
@@ -548,11 +598,12 @@ def should_stop(
             avg = sum(confs) / len(confs)
             return True, f"Confidence trending below threshold ({avg:.2f} < {config.min_confidence_threshold})"
 
-    # 7. No improvements possible (10 consecutive rejections)
-    if len(search_mem.hypotheses) >= 10:
-        last_10 = search_mem.hypotheses[-10:]
-        if all(h.outcome != "accepted" for h in last_10):
-            return True, f"No further improvements found after {len(last_10)} attempts"
+    # 7. No improvements possible (use config threshold, not hardcoded 10)
+    stall_threshold = max(config.max_consecutive_rejections, 10)
+    if len(search_mem.hypotheses) >= stall_threshold:
+        last_n = search_mem.hypotheses[-stall_threshold:]
+        if all(h.outcome != "accepted" for h in last_n):
+            return True, f"No further improvements found after {stall_threshold} attempts"
 
     return False, ""
 
@@ -619,6 +670,80 @@ def _print_iteration(iteration: int, tag: str, detail: str, run_ctx: RunContext)
         f"Budget: {budget:.0f}min | "
         f"Accepts: {run_ctx.total_accepts}, Rejects: {run_ctx.total_rejects}"
     )
+
+
+def _print_review_instructions(run_ctx: RunContext) -> None:
+    """Print post-run instructions: how to review, test, and accept/discard."""
+    wt = run_ctx.worktree_path
+    baseline = run_ctx.baseline_sha or "HEAD~1"
+
+    click.echo("── Review Changes ──")
+    click.echo()
+    click.echo("  See what changed (full diff):")
+    click.echo(f"    cd {wt}")
+    click.echo(f"    git diff {baseline[:8]}..HEAD")
+    click.echo()
+    click.echo("  See each change individually:")
+    click.echo(f"    cd {wt}")
+    click.echo(f"    git log --oneline {baseline[:8]}..HEAD")
+    click.echo(f"    git show <commit-sha>")
+    click.echo()
+
+    # Detect test commands from the worktree
+    test_cmds = _detect_test_commands(str(wt))
+    if test_cmds:
+        click.echo("── Test Before Accepting ──")
+        click.echo()
+        for desc, cmd, cwd in test_cmds:
+            click.echo(f"  {desc}:")
+            click.echo(f"    cd {cwd}")
+            click.echo(f"    {cmd}")
+        click.echo()
+
+    click.echo("── Accept or Discard ──")
+    click.echo()
+    click.echo(f"  To apply changes:  uv run autoimprove merge {run_ctx.run_id}")
+    click.echo(f"  To discard:        uv run autoimprove discard {run_ctx.run_id}")
+    click.echo()
+
+
+def _detect_test_commands(worktree_path: str) -> list[tuple[str, str, str]]:
+    """Detect available test/run commands in the worktree.
+
+    Returns list of (description, command, working_directory).
+    """
+    root = Path(worktree_path)
+    cmds: list[tuple[str, str, str]] = []
+
+    # Check for package.json with scripts (root + one level deep)
+    for search_dir in [root] + [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in ("node_modules", ".next", ".autoimprove", ".git")]:
+        pkg_path = search_dir / "package.json"
+        if not pkg_path.exists():
+            continue
+        try:
+            data = json.loads(pkg_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        scripts = data.get("scripts", {})
+        rel = search_dir.relative_to(root) if search_dir != root else Path(".")
+        label = str(rel) if str(rel) != "." else "root"
+
+        if "test" in scripts:
+            cmds.append((f"Run tests ({label})", "npm test", str(search_dir)))
+        if "dev" in scripts:
+            cmds.append((f"Start dev server ({label})", "npm run dev", str(search_dir)))
+        elif "start" in scripts:
+            cmds.append((f"Start app ({label})", "npm start", str(search_dir)))
+
+    # Check for Python projects
+    for search_dir in [root] + [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in ("node_modules", ".next", ".autoimprove", ".git")]:
+        if (search_dir / "pyproject.toml").exists() or (search_dir / "setup.py").exists():
+            rel = search_dir.relative_to(root) if search_dir != root else Path(".")
+            label = str(rel) if str(rel) != "." else "root"
+            cmds.append((f"Run tests ({label})", "pytest", str(search_dir)))
+            break  # Only add once for Python
+
+    return cmds
 
 
 def _do_criteria_review(agent, criteria_mgr, search_mem, config, run_ctx, iteration):
